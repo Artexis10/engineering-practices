@@ -1,0 +1,9 @@
+classes:
+  tests: ["tests/*"]
+  ci: [".github/*"]
+  product: ["action.yml", "scripts/*", "PRACTICES.md", "README.md"]
+
+python:
+  roots: ["scripts"]
+
+test_jobs: ["fixtures"]

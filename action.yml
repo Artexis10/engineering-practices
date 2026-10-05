@@ -1,0 +1,26 @@
+name: Engineering practices quality check
+description: >-
+  Fails a pull request that adds dead code (knip, deadcode) and posts a Quality
+  report that informs review. Configured by the caller's .github/quality.yml.
+runs:
+  using: composite
+  steps:
+    - name: Dead-code gate
+      shell: bash
+      run: '"$GITHUB_ACTION_PATH/scripts/checks.sh" gate'
+      env:
+        EP_BASE: ${{ github.event.pull_request.base.sha }}
+    - name: Review measures (never fail)
+      if: always()
+      shell: bash
+      run: '"$GITHUB_ACTION_PATH/scripts/checks.sh" measures'
+      env:
+        EP_BASE: ${{ github.event.pull_request.base.sha }}
+    - name: Quality report
+      if: always()
+      shell: bash
+      run: python3 "$GITHUB_ACTION_PATH/scripts/report.py"
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        EP_PR_NUMBER: ${{ github.event.pull_request.number }}
+        EP_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
