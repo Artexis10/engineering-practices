@@ -12,7 +12,7 @@ machine can check.
      count ([reviewdog](https://github.com/reviewdog/reviewdog) filters the rest), so existing dead code
      fails a pull request only when it edits the line that declares it (see "What counts as added"
      below). It also fails when input the repository owns is broken:
-     `.github/quality.yml` does not parse, `npm ci` rejects the lockfile (out of step with
+     `.github/quality.yml` does not parse, `npm ci` rejects the lockfile (missing, out of step with
      `package.json`, or unparseable), knip reports a configuration error, or deadcode cannot load the
      repository's Go code. A tool or dependency that cannot be downloaded or installed, or a tool that
      times out, shows "not run" with its reason, raises a warning, and passes.
