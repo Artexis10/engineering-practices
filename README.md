@@ -10,10 +10,12 @@ machine can check.
      in TypeScript/JavaScript ([knip](https://knip.dev)), unreachable functions in Go
      ([deadcode](https://pkg.go.dev/golang.org/x/tools/cmd/deadcode)). Only lines the pull request adds
      count ([reviewdog](https://github.com/reviewdog/reviewdog) filters the rest), so existing dead code
-     never fails a pull request. It also fails when the repository's own configuration is broken:
-     `.github/quality.yml` does not parse, knip reports a configuration error, or deadcode cannot load
-     the packages. A tool that cannot be downloaded or installed, or times out, shows "not run" with
-     its reason, raises a warning, and passes.
+     fails a pull request only when it edits the line that declares it (see "What counts as added"
+     below). It also fails when input the repository owns is broken:
+     `.github/quality.yml` does not parse, `npm ci` rejects the lockfile (out of step with
+     `package.json`, or unparseable), knip reports a configuration error, or deadcode cannot load the
+     repository's Go code. A tool or dependency that cannot be downloaded or installed, or a tool that
+     times out, shows "not run" with its reason, raises a warning, and passes.
   2. **Posts a Quality report** for the reviewer, as one pull request comment updated in place and as the
      job summary: proof weight per path class, new duplicate code as exact token clones
      ([jscpd](https://github.com/kucherenko/jscpd)), Python definitions nothing references
@@ -61,7 +63,9 @@ then loads the repository's config files (its own, and those its plugins read, s
 `vite.config.ts`) and whatever they import, as the repository's test jobs would. So check out with
 `persist-credentials: false`, keep tokens out of the job's environment (the action passes its token
 to the report step only), and run it on `pull_request`; the action refuses `pull_request_target`,
-which would hand that code a write token and the repository's secrets.
+which would hand that code a write token and the repository's secrets. That code can still write
+`$GITHUB_ENV` and `$GITHUB_PATH` and so reach the report step, which holds the job's token; this matters
+for Dependabot runs, which get the permissions the job declares.
 
 **What counts as added.** A finding fails the gate only on a line the pull request adds. An unused file
 counts only when the pull request adds the file, and an unused dependency only when the merge base did

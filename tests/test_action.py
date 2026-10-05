@@ -31,6 +31,12 @@ JS = {
     "web/src/index.ts": 'import { used } from "./util";\nconsole.log(used());\n',
     "web/src/util.ts": UTIL,
 }
+# A Go module whose CI targets windows.
+GO = {
+    ".github/quality.yml": "go:\n  goos: windows\n",
+    "go.mod": "module example.com/fixture\n\ngo 1.22\n",
+    "main.go": "package main\n\nfunc main() {}\n",
+}
 LEFT_PAD = {
     "1.2.0": "sha512-OQadpCyFCT/VLniZQgym8d3/ofIJtuZyw2ibsVeIUOexKgW/osn8+mMFJbwGMPeDC4GnLzD8q115WPCDx4YRWg==",
     "1.3.0": "sha512-XI5MPzVNApjAyhQzphX8BkmKsKUxD4LdyK24iZeQGinBN9yTQT3bFlCBy/aVx2HrNcqQGsdot8ghrjyrvMCoEA==",
@@ -115,13 +121,8 @@ class Gate(unittest.TestCase):
         self.assertIn("web/src/worker.ts:1: Unused file", findings)
 
     def test_added_unreachable_go_function_fails_for_the_configured_goos(self):
-        base = {
-            ".github/quality.yml": "go:\n  goos: windows\n",
-            "go.mod": "module example.com/fixture\n\ngo 1.22\n",
-            "main.go": "package main\n\nfunc main() {}\n",
-        }
         # Built only for windows, so it is seen only when deadcode runs with the configured GOOS.
-        code, out = gate(base, {"main_windows.go": "package main\n\nfunc unreachable() {}\n"})
+        code, out = gate(GO, {"main_windows.go": "package main\n\nfunc unreachable() {}\n"})
         status, findings = result(out, "deadcode")
         self.assertEqual(code, 1, status)
         self.assertIn("main_windows.go:3: unreachable func: unreachable", findings)
@@ -150,12 +151,30 @@ class Gate(unittest.TestCase):
         self.assertEqual(code, 1, status)
         self.assertRegex(status, r"^failed: knip reports a configuration error: exit 2: \S")
 
+    def test_broken_lockfile_fails(self):
+        code, out = gate(JS, {"web/package-lock.json": "{\n"})
+        status, _ = result(out, "knip")
+        self.assertEqual(code, 1, status)
+        self.assertRegex(status, r"^failed: npm ci rejects the repository's package files: exit \d+: \S")
+
+    def test_go_code_that_does_not_load_fails(self):
+        code, out = gate(GO, {"main.go": 'package main\n\nimport _ "example.com/fixture/missing"\n\nfunc main() {}\n'})
+        status, _ = result(out, "deadcode")
+        self.assertEqual(code, 1, status)
+        self.assertRegex(status, r"^failed: deadcode cannot load the packages \(GOOS=windows\): exit \d+: \S")
+
+    def test_go_module_download_failure_is_neutral(self):
+        # A required module whose host cannot resolve, fetched directly rather than through the proxy.
+        head = {"go.mod": GO["go.mod"] + "\nrequire example.invalid/dep v1.0.0\n"}
+        code, out = gate(GO, head, GOPRIVATE="example.invalid")
+        status, _ = result(out, "deadcode")
+        self.assertEqual(code, 0, status)
+        self.assertRegex(status, r"^not run: cannot download the Go modules: exit \d+: \S")
+
     def test_tool_error_is_neutral_and_reported(self):
-        # The registry is unreachable and the lockfile lacks a dependency, so npm ci cannot install.
-        package = PACKAGE.replace('"private": true', '"private": true, "dependencies": {"left-pad": "1.3.0"}')
-        code, out = gate(
-            JS, {"web/package.json": package}, npm_config_registry="http://127.0.0.1:9/", npm_config_fetch_retries="0"
-        )
+        # The registry is down and nothing is cached, so npm ci cannot install a dependency.
+        env = {"npm_config_registry": "http://127.0.0.1:9/", "npm_config_fetch_retries": "0"}
+        code, out = gate(JS, left_pad("1.3.0"), npm_config_cache=tempfile.mkdtemp(prefix="ep-npm-"), **env)
         status, _ = result(out, "knip")
         self.assertEqual(code, 0, status)
         self.assertRegex(status, r"^not run: npm ci exit \d+: \S")

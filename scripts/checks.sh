@@ -12,7 +12,9 @@
 # "N on added lines", "not configured" or "not run: <reason>") and
 # $EP_OUT/<check>.findings (one "path:line: message" per finding).
 # A download, install or timeout failure is "not run", never a failure: the
-# tools come from the network, and an outage must not freeze every merge.
+# tools and dependencies come from the network, and an outage must not freeze
+# every merge. Input the repository owns (quality.yml, its lockfile, its code
+# and its knip configuration) fails the gate when it is broken.
 #
 # Environment: EP_BASE (the pull request's base commit), EP_OUT and EP_TOOLS
 # (default under $RUNNER_TEMP). Needs bash, git, curl, jq and python3; node for
@@ -60,7 +62,9 @@ enabled() { jq -e --arg key "$1" '(. // {}) | has($key)' "$out/config.json" > /d
 
 # fetch <url> <sha256> <dest>: download a pinned file and check its digest
 fetch() {
-  curl -sSfL --retry 2 -o "$3.part" "$1" && echo "$2  $3.part" | sha256sum -c --quiet - && mv "$3.part" "$3"
+  curl -sSfL --retry 2 -o "$3.part" "$1" || return
+  echo "$2  $3.part" | sha256sum -c --quiet - > /dev/null 2>&1 || { echo "sha256 checksum mismatch for $1" >&2; return 1; }
+  mv "$3.part" "$3"
 }
 
 # setup: install reviewdog and yq, read the config, find the merge base. On failure
@@ -138,8 +142,16 @@ check_knip() {
   enabled javascript || { say knip "not configured"; return; }
   dir=$(cfg '.javascript.root // "."')
   if [ -f "$dir/package.json" ]; then
-    timeout "$TIMEOUT" env -C "$dir" npm ci --ignore-scripts --no-audit --no-fund > /dev/null 2> "$out/knip.err" ||
-      { rc=$?; say knip "not run: npm ci $(why "$rc" "$out/knip.err")"; return; }
+    timeout "$TIMEOUT" env -C "$dir" npm ci --ignore-scripts --no-audit --no-fund > /dev/null 2> "$out/knip.err" || {
+      rc=$?
+      # A lockfile out of step with package.json, or one that does not parse, is the repository's own input.
+      if grep -qE '^npm (ERR!|error) code (EUSAGE|EJSONPARSE)$' "$out/knip.err"; then
+        say knip "failed: npm ci rejects the repository's package files: $(why "$rc" "$out/knip.err")"
+      else
+        say knip "not run: npm ci $(why "$rc" "$out/knip.err")"
+      fi
+      return
+    }
   fi
   node_tools 2> "$out/knip.err" || { rc=$?; say knip "not run: cannot install knip: $(why "$rc" "$out/knip.err")"; return; }
   if [ "$(cfg '.javascript.knip | type')" = object ]; then
@@ -176,7 +188,11 @@ check_deadcode() {
   goos=$(cfg '.go.goos // "linux"')
   [ -x "$bin" ] || GOBIN=$(dirname "$bin") timeout "$TIMEOUT" go install "golang.org/x/tools/cmd/deadcode@v$DEADCODE" 2> "$out/deadcode.err" ||
     { rc=$?; say deadcode "not run: cannot install deadcode: $(why "$rc" "$out/deadcode.err")"; return; }
-  env -C "$dir" GOOS="$goos" timeout "$TIMEOUT" "$bin" -test ./... > "$out/deadcode.txt" 2> "$out/deadcode.err"
+  # Download first (this also fetches any toolchain go.mod asks for): a network failure is "not run".
+  env -C "$dir" timeout "$TIMEOUT" go mod download 2> "$out/deadcode.err" ||
+    { rc=$?; say deadcode "not run: cannot download the Go modules: $(why "$rc" "$out/deadcode.err")"; return; }
+  # With the network off, a load failure is the repository's own code.
+  env -C "$dir" GOOS="$goos" GOPROXY=off timeout "$TIMEOUT" "$bin" -test ./... > "$out/deadcode.txt" 2> "$out/deadcode.err"
   rc=$?
   [ "$rc" != 124 ] || { say deadcode "not run: deadcode $(why "$rc" "$out/deadcode.err")"; return; }
   [ "$rc" = 0 ] || { say deadcode "failed: deadcode cannot load the packages (GOOS=$goos): $(why "$rc" "$out/deadcode.err")"; return; }
