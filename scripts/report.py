@@ -17,13 +17,14 @@ from datetime import datetime
 from pathlib import Path
 
 MARKER = "<!-- engineering-practices:quality-report -->"
+AUTHOR = "github-actions[bot]"  # the GITHUB_TOKEN's identity, which owns the report comment
 REGISTRY = "https://github.com/Artexis10/engineering-practices/blob/v1/PRACTICES.md"
 GATE = [
     ("knip", "Unused files, exports and dependencies (knip)"),
     ("deadcode", "Unreachable Go functions (deadcode)"),
 ]
 MEASURES = [
-    ("jscpd", "New near-duplicate code (jscpd)"),
+    ("jscpd", "New duplicate code, exact token clones (jscpd)"),
     ("vulture", "Python definitions nothing references (vulture, confidence 60+)"),
 ]
 NOT_PROOF = {"product", "docs", "unclassified"}  # every other path class counts as proof
@@ -32,6 +33,11 @@ SAMPLES, MINIMUM = 5, 3  # main runs in the runtime median; fewer than MINIMUM i
 
 env = os.environ.get
 OUT = Path(env("EP_OUT") or Path(os.environ["RUNNER_TEMP"]) / "engineering-practices" / "out")
+
+
+def cell(value):
+    """A value safe inside a Markdown table cell: one line, pipes escaped."""
+    return " ".join(str(value).split()).replace("|", "\\|")
 
 
 def read(name):
@@ -59,11 +65,12 @@ def checks(rows):
     table = ["| Check | Result |", "|---|---|"]
     details = []
     for name, label in rows:
-        table.append(f"| {label} | {read(name + '.status') or 'not run: the step recorded no result'} |")
+        table.append(f"| {label} | {cell(read(name + '.status') or 'not run: the step recorded no result')} |")
         findings = (read(name + ".findings") or "").splitlines()
         if findings:
             more = [f"... and {len(findings) - SHOWN} more"] if len(findings) > SHOWN else []
-            details += ["", f"**{label}**", "", "```", *findings[:SHOWN], *more, "```"]
+            # An indented code block has no closing fence for a finding to forge.
+            details += ["", f"**{label}**", "", *("    " + line for line in findings[:SHOWN] + more)]
     return table + details
 
 
@@ -118,7 +125,7 @@ def proof_weight(config, base):
     for name in [c for c in [*classes, "unclassified"] if c in totals]:
         files, added, removed, binary = totals[name]
         files = f"{files} ({binary} binary, lines not counted)" if binary else files
-        lines.append(f"| {name} | {files} | {added} | {removed} |")
+        lines.append(f"| {cell(name)} | {files} | {added} | {removed} |")
     proof = [c for c in totals if c not in NOT_PROOF]
     if "product" not in classes:
         lines += ["", "No `product` class in `.github/quality.yml`, so product against proof is not computed."]
@@ -127,7 +134,8 @@ def proof_weight(config, base):
         proof_added = sum(totals[c][1] for c in proof)
         lines += [
             "",
-            f"Product +{product} lines against proof +{proof_added} lines ({', '.join(proof) or 'no proof classes changed'}).",
+            f"Product +{product} lines against proof +{proof_added} lines"
+            f" ({cell(', '.join(proof)) or 'no proof classes changed'}).",
             "Proof that outweighs the product it covers needs a reason in review.",
         ]
     return lines
@@ -188,17 +196,16 @@ def runtime(config):
     for name in names:
         job, past = current.get(name), history[name]
         if not job:
-            lines.append(f"| {name} | not run: no job of that name in this run | | |")
+            lines.append(f"| {cell(name)} | not run: no job of that name in this run | | |")
         elif job["status"] != "completed":
-            lines.append(f"| {name} | not run: still running; list it in the quality job's `needs` | | |")
+            lines.append(f"| {cell(name)} | not run: still running; list it in the quality job's `needs` | | |")
         elif len(past) < MINIMUM:
-            lines.append(
-                f"| {name} | {duration(seconds(job))} | not comparable: {len(past)} {branch} runs on {runner(job)} | |"
-            )
+            where = cell(f"{len(past)} {branch} runs on {runner(job)}")
+            lines.append(f"| {cell(name)} | {duration(seconds(job))} | not comparable: {where} | |")
         else:
             now, median = seconds(job), statistics.median(past)
             change = f"{(now - median) / median:+.0%}" if median else "not comparable: median is 0s"
-            lines.append(f"| {name} | {duration(now)} | {duration(median)} ({len(past)} runs) | {change} |")
+            lines.append(f"| {cell(name)} | {duration(now)} | {duration(median)} ({len(past)} runs) | {change} |")
     return lines
 
 
@@ -255,7 +262,7 @@ def publish(body):
                 break
             page += 1
         mine = next(
-            (c for c in comments if MARKER in (c.get("body") or "") and (c.get("user") or {}).get("type") == "Bot"),
+            (c for c in comments if MARKER in (c.get("body") or "") and (c.get("user") or {}).get("login") == AUTHOR),
             None,
         )
         if mine:
@@ -263,10 +270,12 @@ def publish(body):
         else:
             api(f"/repos/{repo}/issues/{number}/comments", "POST", {"body": body})
     except urllib.error.HTTPError as error:
-        return (
-            f"Not posted as a pull request comment: GitHub answered HTTP {error.code}. Pull requests from forks"
-            " and Dependabot get a read-only token, and the job needs `pull-requests: write`. This summary is the report."
-        )
+        try:
+            message = json.load(error).get("message")
+        except Exception:  # noqa: BLE001 - the body is only detail for the note
+            message = None
+        detail = cell(f"{error.code} {message or error.reason}")
+        return f"Not posted as a pull request comment: GitHub answered HTTP {detail}. This summary is the report."
     except Exception as error:  # noqa: BLE001 - a network or data surprise leaves the summary as the report
         return f"Not posted as a pull request comment: {error!r}. This summary is the report."
     return None

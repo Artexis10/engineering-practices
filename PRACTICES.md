@@ -23,7 +23,7 @@ A practice whose only enforcers are review or instruction is listed under [Gaps]
 | T3 | One case per behaviour that differs. Parametrise only where the code branches. | [Hugo 10-01]; [SWE 12], test behaviours, not methods | review; report (proof weight) | Cases and fixtures multiplied across combinations | A real branch loses its case; the reviewer restores it | Reviewer, minutes |
 | T4 | The pyramid: a few end-to-end tests, each driving one whole user workflow through every layer and naming it; integration tests at the boundaries (API, database, auth, tenant); unit and contract tests where logic branches. No ratio is enforced. | [Vocke]; [SWE 11], test sizes; [SWE 14]; [Hugo 10-01] | report (test runtime against main); review (a new end-to-end test names its workflow) | Slow suites built from tests at the wrong level | Runner noise reads as a slowdown; the reviewer checks the median and the run count | Reviewer, minutes |
 | T5 | A test exercises real code and asserts something a realistic defect would change. Prefer real implementations to mocks. | [Hugo 10-01]; [SWE 13], prefer realism over isolation | review | Tests that pass whatever the code does | A justified mock (network, clock) is questioned; the author names the reason | Author agent, minutes |
-| T6 | DAMP in tests: each test reads on its own; repeat setup rather than hide its meaning in shared helpers. | [SWE 12], DAMP, not DRY; [Beck], readable | instruction; review | Tests whose meaning lives several files away | Near-duplicate test code appears in the report (C2) and is accepted, not deduplicated | Reviewer, seconds |
+| T6 | DAMP in tests: each test reads on its own; repeat setup rather than hide its meaning in shared helpers. | [SWE 12], DAMP, not DRY; [Beck], readable | instruction; review | Tests whose meaning lives several files away | Duplicate test code appears in the report (C2) and is accepted, not deduplicated | Reviewer, seconds |
 | T7 | "Nothing changes" means it works the same: prove a port or refactor by its workflows and data, not by snapshots of its output. | [Hugo 10-01] | review | Byte-for-byte snapshot suites that outweigh the change | A snapshot that pins a real contract (a wire format) is questioned; the author names the contract | Author agent, minutes |
 | T8 | Coverage percentages gate nothing. | [Fowler]; [SWE 11], code coverage; [Hugo 10-05] | review (a new threshold is refused) | Tests written to execute lines rather than catch failures | None from the rule; a coverage drop goes unflagged, and T1 to T5 carry the judgement | Nobody |
 
@@ -31,8 +31,8 @@ A practice whose only enforcers are review or instruction is listed under [Gaps]
 
 | ID | Practice | Source | Enforcer | Prevents | Wrong-fire cost | Who pays |
 |---|---|---|---|---|---|---|
-| C1 | No new dead code: no unused file, export or dependency (TS/JS) and no unreachable function (Go) on the lines a pull request adds. | [Hugo 10-05] | gate (knip, deadcode on added lines); report (vulture for Python); ruff F401/F841 in each Python repository's own lint | Dead weight that the 2026-10-05 audit removed by the thousand lines | An entry point the tool cannot see (framework file, dynamic dispatch) blocks the PR until an ignore entry lands in `.github/quality.yml`, where review sees it | Author agent, minutes |
-| C2 | DRY of knowledge in product code: one source for each rule, value or vendored file. A second copy needs an import, generator or dependency that keeps it in step, or names the change that deletes it. | [PragProg], DRY is about knowledge; [Hugo 10-01] | report (jscpd near-duplicates on added lines); review | Copies that drift apart | jscpd flags code that only looks alike; the reviewer dismisses it (see C3) | Reviewer, seconds |
+| C1 | No new dead code: no unused file, export or dependency (TS/JS) and no unreachable function (Go) on the lines a pull request adds. | [Hugo 10-05] | gate (knip, deadcode on added lines); report (vulture for Python); ruff F401/F841 for Python, added to CI during rollout where it is missing (q, together-unprocessed) | Dead weight that the 2026-10-05 audit removed by the thousand lines | An entry point the tool cannot see (framework file, dynamic dispatch) blocks the PR until an ignore entry lands in `.github/quality.yml`, where review sees it. Editing the declaration line of an export that was already unused also fails; the remedy is deleting it | Author agent, minutes |
+| C2 | DRY of knowledge in product code: one source for each rule, value or vendored file. A second copy needs an import, generator or dependency that keeps it in step, or names the change that deletes it. | [PragProg], DRY is about knowledge; [Hugo 10-01] | report (jscpd duplicate code, exact token clones, on added lines); review | Copies that drift apart | jscpd flags copies that encode different knowledge (boilerplate, DAMP tests); the reviewer dismisses it (see C3, T6) | Reviewer, seconds |
 | C3 | Prefer duplication over the wrong abstraction. Do not merge code that merely looks alike; inline an abstraction that has grown a parameter per caller. | [Metz] | review | Shared helpers bent to fit every caller | Real shared knowledge stays duplicated; the test is whether the copies encode the same rule (C2) | Reviewer, minutes |
 | C4 | Copying is not a justification, and new code sets the pattern the next change copies. Name an unsound existing pattern and propose a better shape. | [Hugo 10-01] | instruction | Unsound patterns spreading by imitation | The author spends minutes on a pattern that was fine | Author agent, minutes |
 
@@ -64,8 +64,9 @@ A practice whose only enforcers are review or instruction is listed under [Gaps]
 
 These practices have no automated enforcer; they rely on the author and the independent reviewer.
 
-- **Review only:** T1, T2, T3 (proof weight hints at T1 and T3 but cannot judge them), T5, T7, T8, C3, W2, K1.
-- **Instruction only:** T6, C4, W3, K2, K3, K4.
+- **Review, with or without an instruction:** T1, T2, T3 (proof weight hints at T1 and T3 but cannot
+  judge them), T5, T6, T7, T8, C3, W2, W3, K1, K3.
+- **Instruction only:** C4, K2, K4.
 - **Partly covered:** C1 does not catch a callee left dead when a pull request removes its caller in another
   file; the monthly gardener sweeps that. Python has no dead-code gate, only the vulture measure and ruff.
 

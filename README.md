@@ -10,10 +10,12 @@ machine can check.
      in TypeScript/JavaScript ([knip](https://knip.dev)), unreachable functions in Go
      ([deadcode](https://pkg.go.dev/golang.org/x/tools/cmd/deadcode)). Only lines the pull request adds
      count ([reviewdog](https://github.com/reviewdog/reviewdog) filters the rest), so existing dead code
-     never fails a pull request. A tool that errors or times out shows "not run" with its reason and
-     passes.
+     never fails a pull request. It also fails when the repository's own configuration is broken:
+     `.github/quality.yml` does not parse, knip reports a configuration error, or deadcode cannot load
+     the packages. A tool that cannot be downloaded or installed, or times out, shows "not run" with
+     its reason, raises a warning, and passes.
   2. **Posts a Quality report** for the reviewer, as one pull request comment updated in place and as the
-     job summary: proof weight per path class, new near-duplicate code
+     job summary: proof weight per path class, new duplicate code as exact token clones
      ([jscpd](https://github.com/kucherenko/jscpd)), Python definitions nothing references
      ([vulture](https://github.com/jendrikseipp/vulture), confidence 60 and up), and test-job runtime
      against main. These fail nothing. A measure that could not be computed says "not run" and why.
@@ -27,6 +29,9 @@ Add one job to the repository's pull-request workflow:
     if: ${{ github.event_name == 'pull_request' && !cancelled() }}
     needs: [test]            # the test jobs named in quality.yml, so their runtime is known; or drop it
     runs-on: ubuntu-latest
+    concurrency:
+      group: quality-${{ github.workflow }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions:
       contents: read
       pull-requests: write   # the sticky comment
@@ -35,6 +40,7 @@ Add one job to the repository's pull-request workflow:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0     # the merge base must be present
+          persist-credentials: false
       - uses: Artexis10/engineering-practices@v1
 ```
 
@@ -42,11 +48,26 @@ Then commit `.github/quality.yml` (below). The workflow should also run on pushe
 so the runtime measure has main runs to compare with.
 
 The action runs on Linux x86_64 and needs `git`, `curl`, `jq` and `python3`, plus `node` when JavaScript
-is configured and `go` when Go is. GitHub's `ubuntu-latest` has all of them. Tool versions are pinned in
-`scripts/checks.sh`.
+is configured and `go` when Go is. GitHub's `ubuntu-latest` has all of them. Every tool is pinned:
+reviewdog, yq and deadcode in `scripts/checks.sh`, knip and jscpd with their whole dependency tree and
+its digests in `tools/package-lock.json`, vulture by digest in `tools/requirements.txt`.
 
-Pull requests from forks and Dependabot get a read-only token, so their report appears in the job
-summary only, and the summary says so.
+Pull requests from forks get a read-only token whatever the job declares, so their report appears in
+the job summary only, and the summary gives GitHub's answer. Dependabot pull requests run with the
+permissions the job declares.
+
+**The gate runs the pull request's code.** `npm ci --ignore-scripts` skips install scripts only. knip
+then loads the repository's config files (its own, and those its plugins read, such as
+`vite.config.ts`) and whatever they import, as the repository's test jobs would. So check out with
+`persist-credentials: false`, keep tokens out of the job's environment (the action passes its token
+to the report step only), and run it on `pull_request`; the action refuses `pull_request_target`,
+which would hand that code a write token and the repository's secrets.
+
+**What counts as added.** A finding fails the gate only on a line the pull request adds. An unused file
+counts only when the pull request adds the file, and an unused dependency only when the merge base did
+not declare it, so editing an old unused file or bumping an old unused dependency passes. Editing the
+declaration line of an export that was already unused still fails, because that line counts as added:
+delete the export, or leave that line alone.
 
 ## `.github/quality.yml`
 
@@ -85,7 +106,7 @@ python:                # turns on the vulture measure
   ignore_decorators: ["@app.route"]
   exclude: ["*/migrations/*"]
 
-duplicates:            # the jscpd measure always runs
+duplicates:            # the jscpd measure (exact token clones) always runs
   paths: ["src"]       # default ["."]; .gitignore is respected
   ignore: ["**/fixtures/**"]
 

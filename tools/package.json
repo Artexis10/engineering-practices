@@ -1,0 +1,9 @@
+{
+  "name": "engineering-practices-tools",
+  "private": true,
+  "description": "The Node tools the quality action runs, pinned with their whole dependency tree by package-lock.json.",
+  "dependencies": {
+    "jscpd": "5.4.0",
+    "knip": "6.39.0"
+  }
+}

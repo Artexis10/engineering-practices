@@ -7,6 +7,7 @@ request. The first run downloads the pinned tools (set EP_TOOLS to reuse them).
     python3 -m unittest discover -s tests -v
 """
 
+import json
 import os
 import subprocess
 import tempfile
@@ -30,6 +31,22 @@ JS = {
     "web/src/index.ts": 'import { used } from "./util";\nconsole.log(used());\n',
     "web/src/util.ts": UTIL,
 }
+LEFT_PAD = {
+    "1.2.0": "sha512-OQadpCyFCT/VLniZQgym8d3/ofIJtuZyw2ibsVeIUOexKgW/osn8+mMFJbwGMPeDC4GnLzD8q115WPCDx4YRWg==",
+    "1.3.0": "sha512-XI5MPzVNApjAyhQzphX8BkmKsKUxD4LdyK24iZeQGinBN9yTQT3bFlCBy/aVx2HrNcqQGsdot8ghrjyrvMCoEA==",
+}
+
+
+def left_pad(version):
+    """web/package.json and its lockfile declaring left-pad, which no code imports."""
+    package, lock = json.loads(PACKAGE), json.loads(LOCK)
+    package["dependencies"] = lock["packages"][""]["dependencies"] = {"left-pad": version}
+    lock["packages"]["node_modules/left-pad"] = {
+        "version": version,
+        "resolved": f"https://registry.npmjs.org/left-pad/-/left-pad-{version}.tgz",
+        "integrity": LEFT_PAD[version],
+    }
+    return {"web/package.json": json.dumps(package, indent=2), "web/package-lock.json": json.dumps(lock, indent=2)}
 
 
 def repository(base, head):
@@ -108,6 +125,30 @@ class Gate(unittest.TestCase):
         status, findings = result(out, "deadcode")
         self.assertEqual(code, 1, status)
         self.assertIn("main_windows.go:3: unreachable func: unreachable", findings)
+
+    def test_edit_of_already_unused_file_passes(self):
+        base = {**JS, "web/src/legacy.ts": "// legacy helper\nconsole.log('x');\n"}
+        code, out = gate(base, {"web/src/legacy.ts": "// legacy helper, reworded\nconsole.log('x');\n"})
+        self.assertIn("legacy.ts", (out / "knip.sarif").read_text())  # knip still reports it on the head
+        self.assertEqual((code, result(out, "knip")[0]), (0, "passed"))
+
+    def test_added_unused_dependency_fails(self):
+        code, out = gate(JS, left_pad("1.3.0"))
+        status, findings = result(out, "knip")
+        self.assertEqual(code, 1, status)
+        self.assertIn("Unused dependency: left-pad", findings)
+
+    def test_bump_of_already_unused_dependency_passes(self):
+        code, out = gate({**JS, **left_pad("1.2.0")}, left_pad("1.3.0"))
+        self.assertIn("left-pad", (out / "knip.sarif").read_text())  # knip still reports it on the head
+        self.assertEqual((code, result(out, "knip")[0]), (0, "passed"))
+
+    def test_configuration_error_fails(self):
+        config = "javascript:\n  root: web\n  knip:\n    entry: 5\n"
+        code, out = gate(JS, {".github/quality.yml": config})
+        status, _ = result(out, "knip")
+        self.assertEqual(code, 1, status)
+        self.assertRegex(status, r"^failed: knip reports a configuration error: exit 2: \S")
 
     def test_tool_error_is_neutral_and_reported(self):
         # The registry is unreachable and the lockfile lacks a dependency, so npm ci cannot install.

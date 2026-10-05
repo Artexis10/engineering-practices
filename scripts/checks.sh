@@ -4,25 +4,28 @@
 # current directory, over the diff between the merge base and HEAD.
 #
 #   checks.sh gate       knip (TS/JS) and deadcode (Go); exits 1 when either
-#                        reports a finding on a line the diff adds
+#                        reports a finding on a line the diff adds, or reports
+#                        that the repository's own configuration is broken
 #   checks.sh measures   jscpd and vulture; never fails
 #
 # Each check writes $EP_OUT/<check>.status ("passed", "failed: ...",
 # "N on added lines", "not configured" or "not run: <reason>") and
 # $EP_OUT/<check>.findings (one "path:line: message" per finding).
-# A tool that errors or times out is "not run", never a failure: the tools
-# come from the network, and an outage must not freeze every merge.
+# A download, install or timeout failure is "not run", never a failure: the
+# tools come from the network, and an outage must not freeze every merge.
 #
 # Environment: EP_BASE (the pull request's base commit), EP_OUT and EP_TOOLS
 # (default under $RUNNER_TEMP). Needs bash, git, curl, jq and python3; node for
 # knip and jscpd; go for deadcode. Linux x86_64 only.
 set -uo pipefail
 
-# Pinned tools. Moving a version is a change to this file, gated by the fixture tests.
+# Pinned tools. knip and jscpd are pinned with their whole dependency tree by
+# tools/package-lock.json, vulture by tools/requirements.txt. Moving a version is
+# a change to these files, gated by the fixture tests.
 REVIEWDOG=0.21.2 REVIEWDOG_SHA256=30413aa3c7443e9c3c157fe5766cad40e3bb39a32e210ee69b710a8d5c4b8e51
 YQ=4.54.1 YQ_SHA256=8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
-KNIP=6.39.0 DEADCODE=0.51.0 JSCPD=5.4.0 VULTURE=2.16
-TIMEOUT=600 # seconds, per tool command
+DEADCODE=0.51.0 # golang.org/x/tools; go install checks it against the Go checksum database
+TIMEOUT=600     # seconds, per tool command
 
 mode=${1:-}
 case $mode in
@@ -30,19 +33,25 @@ case $mode in
   measures) checks=(jscpd vulture) ;;
   *) echo "usage: checks.sh gate|measures" >&2; exit 2 ;;
 esac
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 out=${EP_OUT:-${RUNNER_TEMP:?}/engineering-practices/out}
 tools=${EP_TOOLS:-${RUNNER_TEMP:?}/engineering-practices/tools}
 mkdir -p "$out" "$tools"
 rd=$tools/reviewdog-$REVIEWDOG yq=$tools/yq-$YQ
 
-# say <check> <status>: record a check's result
-say() { printf '%s\n' "$2" > "$out/$1.status"; echo "$1: $2"; }
+# say <check> <status>: record a check's result, one line
+say() {
+  local status=${2%%$'\n'*}
+  printf '%s\n' "$status" > "$out/$1.status"
+  echo "$1: $status"
+  [[ $status != "not run"* ]] || echo "::warning::$1: ${status//%/%25}"
+}
 
 # why <exit code> <stderr file>: one line saying why a command gave no result
 why() {
   if [ "$1" = 124 ]; then echo "timed out after ${TIMEOUT}s"; return; fi
   local line
-  line=$(grep -m1 -i error "$2" 2>/dev/null || head -n1 "$2" 2>/dev/null)
+  line=$({ grep -m1 -i error "$2" || head -n1 "$2"; } 2>/dev/null | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   echo "exit $1: ${line:-no output}"
 }
 
@@ -54,8 +63,8 @@ fetch() {
   curl -sSfL --retry 2 -o "$3.part" "$1" && echo "$2  $3.part" | sha256sum -c --quiet - && mv "$3.part" "$3"
 }
 
-# setup: install reviewdog and yq, read the config, find the merge base.
-# Prints the reason and fails when the checks cannot run at all.
+# setup: install reviewdog and yq, read the config, find the merge base. On failure
+# prints the reason and returns 1, or 2 when the repository's config is broken.
 setup() {
   local rc err=$out/setup.err
   [ "$(uname -sm)" = "Linux x86_64" ] || { echo "the runner is $(uname -sm); the action supports Linux x86_64"; return 1; }
@@ -70,28 +79,41 @@ setup() {
   fi
   [ -f .github/quality.yml ] || { echo "the repository has no .github/quality.yml"; return 1; }
   "$yq" -o=json . .github/quality.yml > "$out/config.json" 2> "$err" ||
-    { rc=$?; echo "cannot read .github/quality.yml: $(why "$rc" "$err")"; return 1; }
+    { rc=$?; echo ".github/quality.yml does not parse: $(why "$rc" "$err")"; return 2; }
   [ -n "${EP_BASE:-}" ] || { echo "no pull request base commit; the action runs on pull_request events"; return 1; }
   git merge-base "$EP_BASE" HEAD > "$out/merge_base" 2> "$err" ||
     { rc=$?; echo "no merge base with $EP_BASE ($(why "$rc" "$err")); check out with fetch-depth: 0"; return 1; }
 }
 
+# node_tools: install knip and jscpd exactly as tools/package-lock.json pins them
+node_tools() {
+  local dir
+  dir=$tools/node-$(sha256sum < "$here/tools/package-lock.json" | cut -c1-12)
+  [ -f "$dir/installed" ] && return
+  mkdir -p "$dir" && cp "$here/tools/package.json" "$here/tools/package-lock.json" "$dir/" &&
+    timeout "$TIMEOUT" npm ci --ignore-scripts --no-audit --no-fund --prefix "$dir" > /dev/null && touch "$dir/installed"
+}
+node_bin() { echo "$tools/node-$(sha256sum < "$here/tools/package-lock.json" | cut -c1-12)/node_modules/.bin/$1"; }
+
 # filter <check> <dir> <fail level> <reviewdog input flags...> < tool output
 # Keeps the findings on lines the diff adds. Runs in <dir>, where the tool ran,
-# so that reviewdog maps the tool's relative paths onto the diff.
+# so that reviewdog maps the tool's relative paths onto the diff. --text keeps a
+# .gitattributes "-diff" from hiding a file's lines from the filter.
 filter() {
   local check=$1 dir=$2 level=$3 rc n
   shift 3
   env -C "$dir" "$rd" "$@" -name="$check" -reporter=rdjsonl -filter-mode=added -fail-level="$level" \
-    -diff="git diff $(cat "$out/merge_base") HEAD" > "$out/$check.rdjsonl" 2> "$out/$check.err"
+    -diff="git diff --text $mb HEAD" > "$out/$check.rdjsonl" 2> "$out/$check.err"
   rc=$?
   if [ "$rc" -ne 0 ] && [ ! -s "$out/$check.rdjsonl" ]; then
     say "$check" "not run: reviewdog $(why "$rc" "$out/$check.err")"
     return
   fi
-  jq -r --arg dir "$dir" '"\(if $dir == "." then "" else $dir + "/" end)\(.location.path):\(.location.range.start.line // 1): \(.message)"' \
+  # A path or message with a control character is shown JSON-escaped, so it stays on one line.
+  jq -r --arg dir "$dir" 'def safe: if test("[[:cntrl:]]") then tojson else . end;
+    "\((if $dir == "." then "" else $dir + "/" end) + .location.path | safe):\(.location.range.start.line // 1): \(.message | safe)"' \
     "$out/$check.rdjsonl" > "$out/$check.findings"
-  n=$(wc -l < "$out/$check.findings")
+  n=$(jq -s length "$out/$check.rdjsonl")
   if [ "$level" = none ]; then
     if [ "$n" -gt 0 ]; then say "$check" "$n on added lines"; else say "$check" "none on added lines"; fi
   elif [ "$rc" -ne 0 ]; then
@@ -102,6 +124,15 @@ filter() {
   sed 's/^/  /' "$out/$check.findings"
 }
 
+# base_deps <dir>: {"<package.json under dir>": [the dependencies it declared at the merge base]}
+base_deps() {
+  jq -r 'select(.code.value // "" | endswith("ependencies")) | .location.path' "$out/knip.all.rdjsonl" | sort -u |
+    while IFS= read -r manifest; do
+      env -C "$1" git show "$mb:./$manifest" 2> /dev/null | jq --arg manifest "$manifest" \
+        '{($manifest): [(.dependencies, .devDependencies, .optionalDependencies, .peerDependencies) // {} | keys[]]}' 2> /dev/null
+    done | jq -s 'add // {}'
+}
+
 check_knip() {
   local dir rc config=()
   enabled javascript || { say knip "not configured"; return; }
@@ -110,19 +141,32 @@ check_knip() {
     timeout "$TIMEOUT" env -C "$dir" npm ci --ignore-scripts --no-audit --no-fund > /dev/null 2> "$out/knip.err" ||
       { rc=$?; say knip "not run: npm ci $(why "$rc" "$out/knip.err")"; return; }
   fi
+  node_tools 2> "$out/knip.err" || { rc=$?; say knip "not run: cannot install knip: $(why "$rc" "$out/knip.err")"; return; }
   if [ "$(cfg '.javascript.knip | type')" = object ]; then
     jq .javascript.knip "$out/config.json" > "$out/knip.json"
     config=(--config "$out/knip.json")
   fi
-  timeout "$TIMEOUT" npx --yes "knip@$KNIP" --directory "$dir" "${config[@]}" --include files,exports,dependencies \
+  timeout "$TIMEOUT" "$(node_bin knip)" --directory "$dir" "${config[@]}" --include files,exports,dependencies \
     --reporter sarif --no-progress > "$out/knip.sarif" 2> "$out/knip.err"
-  rc=$?
+  rc=$? # 1 means it found unused code; 2 means the repository's configuration is broken
+  [ "$rc" != 2 ] || { say knip "failed: knip reports a configuration error: $(why "$rc" "$out/knip.err")"; return; }
   [ "$rc" -le 1 ] || { say knip "not run: knip $(why "$rc" "$out/knip.err")"; return; }
-  # An unused file's result has no region, and the added-line filter drops results without one.
-  jq '(.runs[].results[].locations[]?.physicalLocation | select(.region == null) | .region) = {startLine: 1}' \
-    "$out/knip.sarif" > "$out/knip.lines.sarif" 2> "$out/knip.err" ||
-    { rc=$?; say knip "not run: knip output is not SARIF ($(why "$rc" "$out/knip.err"))"; return; }
-  filter knip "$dir" error -f=sarif < "$out/knip.lines.sarif"
+  # Read the SARIF once without filtering: reviewdog decodes its URIs into the paths git uses.
+  env -C "$dir" "$rd" -f=sarif -filter-mode=nofilter -reporter=rdjsonl < "$out/knip.sarif" > "$out/knip.all.rdjsonl" 2> "$out/knip.err" ||
+    { rc=$?; say knip "not run: reviewdog cannot read knip's output: $(why "$rc" "$out/knip.err")"; return; }
+  # Old debt stays out of the gate. An unused file's finding has no line and the added-line filter
+  # drops it, so only a file this pull request adds gets line 1. An unused dependency the merge base
+  # already declared is dropped, so a version bump on its line does not fail.
+  env -C "$dir" git diff --text -z --name-only --diff-filter=A --relative "$mb" HEAD > "$out/knip.added"
+  base_deps "$dir" > "$out/knip.base.json"
+  jq -c --rawfile added "$out/knip.added" --slurpfile base "$out/knip.base.json" '
+    ($added | split("\u0000")) as $new
+    | if .location.range == null and (.location.path | IN($new[])) then .location.range = {start: {line: 1}} else . end
+    | select((.code.value // "" | endswith("ependencies") | not)
+        or ((.message | sub("^[^:]*: "; "")) as $name | $base[0][.location.path] // [] | any(.[]; . == $name) | not))' \
+    "$out/knip.all.rdjsonl" > "$out/knip.new.rdjsonl" 2> "$out/knip.err" ||
+    { rc=$?; say knip "not run: cannot read knip's findings: $(why "$rc" "$out/knip.err")"; return; }
+  filter knip "$dir" error -f=rdjsonl < "$out/knip.new.rdjsonl"
 }
 
 check_deadcode() {
@@ -132,12 +176,14 @@ check_deadcode() {
   goos=$(cfg '.go.goos // "linux"')
   [ -x "$bin" ] || GOBIN=$(dirname "$bin") timeout "$TIMEOUT" go install "golang.org/x/tools/cmd/deadcode@v$DEADCODE" 2> "$out/deadcode.err" ||
     { rc=$?; say deadcode "not run: cannot install deadcode: $(why "$rc" "$out/deadcode.err")"; return; }
-  env -C "$dir" GOOS="$goos" timeout "$TIMEOUT" "$bin" -test ./... > "$out/deadcode.txt" 2> "$out/deadcode.err" ||
-    { rc=$?; say deadcode "not run: deadcode (GOOS=$goos) $(why "$rc" "$out/deadcode.err")"; return; }
+  env -C "$dir" GOOS="$goos" timeout "$TIMEOUT" "$bin" -test ./... > "$out/deadcode.txt" 2> "$out/deadcode.err"
+  rc=$?
+  [ "$rc" != 124 ] || { say deadcode "not run: deadcode $(why "$rc" "$out/deadcode.err")"; return; }
+  [ "$rc" = 0 ] || { say deadcode "failed: deadcode cannot load the packages (GOOS=$goos): $(why "$rc" "$out/deadcode.err")"; return; }
   cfg '.go.ignore // [] | .[]' > "$out/deadcode.ignore"
   grep -Ev -f "$out/deadcode.ignore" "$out/deadcode.txt" > "$out/deadcode.kept" 2> "$out/deadcode.err"
   rc=$?
-  [ "$rc" -le 1 ] || { say deadcode "not run: go.ignore in .github/quality.yml is not a valid regex list ($(why "$rc" "$out/deadcode.err"))"; return; }
+  [ "$rc" -le 1 ] || { say deadcode "failed: go.ignore in .github/quality.yml is not a valid regex list ($(why "$rc" "$out/deadcode.err"))"; return; }
   filter deadcode "$dir" error -efm='%f:%l:%c: %m' < "$out/deadcode.kept"
 }
 
@@ -145,8 +191,9 @@ check_jscpd() {
   local rc ignore paths=()
   mapfile -t paths < <(cfg '.duplicates.paths // ["."] | .[]')
   ignore=$(cfg '.duplicates.ignore // [] | join(",")')
+  node_tools 2> "$out/jscpd.err" || { rc=$?; say jscpd "not run: cannot install jscpd: $(why "$rc" "$out/jscpd.err")"; return; }
   rm -rf "$out/jscpd"
-  timeout "$TIMEOUT" npx --yes "jscpd@$JSCPD" --reporters sarif --output "$out/jscpd" ${ignore:+--ignore "$ignore"} \
+  timeout "$TIMEOUT" "$(node_bin jscpd)" --reporters sarif --output "$out/jscpd" ${ignore:+--ignore "$ignore"} \
     "${paths[@]}" > /dev/null 2> "$out/jscpd.err" ||
     { rc=$?; say jscpd "not run: jscpd $(why "$rc" "$out/jscpd.err")"; return; }
   # jscpd reports a clone once, at one of its copies; report it at both so an added copy survives the filter.
@@ -159,14 +206,18 @@ check_jscpd() {
 }
 
 check_vulture() {
-  local rc key value roots=() args=() venv=$tools/vulture-$VULTURE
+  local rc key value roots=() args=() venv
   enabled python || { say vulture "not configured"; return; }
   mapfile -t roots < <(cfg '.python.roots // ["."] | .[]')
   for key in ignore_names ignore_decorators exclude; do
     value=$(cfg ".python.$key // [] | join(\",\")")
     [ -z "$value" ] || args+=("--${key//_/-}" "$value")
   done
-  [ -x "$venv/bin/vulture" ] || { python3 -m venv "$venv" && "$venv/bin/pip" install -q "vulture==$VULTURE"; } > /dev/null 2> "$out/vulture.err" ||
+  venv=$tools/python-$(sha256sum < "$here/tools/requirements.txt" | cut -c1-12)
+  [ -x "$venv/bin/vulture" ] || {
+    python3 -m venv "$venv" &&
+      "$venv/bin/pip" install -q --require-hashes --only-binary=:all: -r "$here/tools/requirements.txt"
+  } > /dev/null 2> "$out/vulture.err" ||
     { rc=$?; say vulture "not run: cannot install vulture: $(why "$rc" "$out/vulture.err")"; return; }
   timeout "$TIMEOUT" "$venv/bin/vulture" --min-confidence 60 "${args[@]}" "${roots[@]}" > "$out/vulture.txt" 2> "$out/vulture.err"
   rc=$? # 3 means it found unused code
@@ -175,16 +226,27 @@ check_vulture() {
 }
 
 for check in "${checks[@]}"; do rm -f "$out/$check.status" "$out/$check.findings"; done
-if reason=$(setup); then
-  rm -f "$out/setup.reason"
-  for check in "${checks[@]}"; do "check_$check"; done
-else
-  printf '%s\n' "$reason" > "$out/setup.reason"
-  for check in "${checks[@]}"; do say "$check" "not run: $reason"; done
-fi
+reason=$(setup)
+case $? in
+  0)
+    rm -f "$out/setup.reason"
+    mb=$(cat "$out/merge_base")
+    for check in "${checks[@]}"; do "check_$check"; done
+    ;;
+  2) # the repository's own config is broken: the gate fails, the measures do not run
+    printf '%s\n' "$reason" > "$out/setup.reason"
+    for check in "${checks[@]}"; do
+      if [ "$mode" = gate ]; then say "$check" "failed: $reason"; else say "$check" "not run: $reason"; fi
+    done
+    ;;
+  *)
+    printf '%s\n' "$reason" > "$out/setup.reason"
+    for check in "${checks[@]}"; do say "$check" "not run: $reason"; done
+    ;;
+esac
 
 if [ "$mode" = gate ] && grep -qs '^failed' "$out/knip.status" "$out/deadcode.status"; then
-  echo "The pull request adds dead code. Remove it, or declare a real entry point in .github/quality.yml."
+  echo "::error::The dead-code gate failed; see the findings above and the Quality report."
   exit 1
 fi
 exit 0

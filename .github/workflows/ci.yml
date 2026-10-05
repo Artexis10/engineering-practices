@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - run: python3 -m unittest discover -s tests -v
 
   # The action on this repository itself: proves action.yml's wiring, which the fixtures do not run.
@@ -20,6 +22,9 @@ jobs:
     if: ${{ github.event_name == 'pull_request' && !cancelled() }}
     needs: [fixtures]
     runs-on: ubuntu-latest
+    concurrency:
+      group: quality-${{ github.workflow }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions:
       contents: read
       pull-requests: write
@@ -28,4 +33,5 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: ./
