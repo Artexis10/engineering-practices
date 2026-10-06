@@ -244,6 +244,26 @@ class Gate(unittest.TestCase):
         self.assertEqual(proc.returncode, 1, status)
         self.assertIn("main_windows.go:3: unreachable func: unreachable", findings)
 
+    def test_build_tags_in_callers_goflags_do_not_hide_dead_code(self):
+        # deadcode ignores tags in GOFLAGS, so the file list it is matched against must too.
+        dead = "//go:build !foo\n\npackage main\n\nfunc unreachable() {}\n"
+        code, out = gate(GO, {"main_notfoo.go": dead}, GOFLAGS="-tags=foo")
+        status, findings = result(out, "deadcode")
+        self.assertEqual(code, 1, status)
+        self.assertIn("main_notfoo.go:5: unreachable func: unreachable", findings)
+
+    def test_go_check_in_a_linked_worktree_reports_dead_code(self):
+        # A linked worktree's .git is a file, which Go's VCS lookup walks past to the nearest .git
+        # directory above it: here an empty stub that git rejects, as an agent sandbox leaves.
+        path, base = repository(GO, {"main_windows.go": "package main\n\nfunc unreachable() {}\n"})
+        parent = Path(tempfile.mkdtemp(prefix="ep-worktree-"))
+        (parent / ".git").mkdir()
+        git(path, "worktree", "add", "-q", "--detach", str(parent / "linked"))
+        proc, out = run(parent / "linked", base, str(SCRIPTS / "checks.sh"), "gate")
+        status, findings = result(out, "deadcode")
+        self.assertEqual(proc.returncode, 1, status)
+        self.assertIn("main_windows.go:3: unreachable func: unreachable", findings)
+
     def test_spent_time_budget_leaves_a_download_not_run(self):
         tools = tempfile.mkdtemp(prefix="ep-tools-")  # empty, so reviewdog must be downloaded
         code, out = gate(JS, {"web/src/note.ts": "x\n"}, EP_BUDGET="0", EP_TOOLS=tools)
