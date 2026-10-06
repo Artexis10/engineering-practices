@@ -20,6 +20,7 @@ runs:
       env:
         EP_BASE: ${{ github.event.pull_request.base.sha }}
         EP_HEAD: ${{ github.event.pull_request.head.sha }}
+        EP_BASE_REF: ${{ github.event.pull_request.base.ref }}
     - name: Review measures (never fail)
       if: ${{ !cancelled() && github.event_name != 'pull_request_target' }}
       shell: bash
@@ -27,6 +28,7 @@ runs:
       env:
         EP_BASE: ${{ github.event.pull_request.base.sha }}
         EP_HEAD: ${{ github.event.pull_request.head.sha }}
+        EP_BASE_REF: ${{ github.event.pull_request.base.ref }}
     - name: Quality report
       if: ${{ !cancelled() && github.event_name != 'pull_request_target' }}
       shell: bash

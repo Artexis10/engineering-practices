@@ -31,6 +31,11 @@ JS = {
     "web/src/index.ts": 'import { used } from "./util";\nconsole.log(used());\n',
     "web/src/util.ts": UTIL,
 }
+# A Python package with an unused import already on main.
+PY = {
+    ".github/quality.yml": "python:\n  roots: [src]\n",
+    "src/app.py": "import os\nimport sys\n\nprint(sys.argv)\n",
+}
 # A Go module whose CI targets windows.
 GO = {
     ".github/quality.yml": "go:\n  goos: windows\n",
@@ -79,11 +84,13 @@ def repository(base, head):
     return path, base_commit
 
 
-def merge_ref(base, branch, main_later):
-    """A pull request's merge ref after main moved on: returns (path, event base, pull request head).
+def main_moved_on(base, branch, main_later, merge_ref):
+    """A pull request checked out after main moved on: returns (path, event base, pull request head).
 
-    main holds `base`; the pull request branches off it and adds `branch`; main then gains
-    `main_later`; HEAD merges the pull request into main as it is now, as actions/checkout does.
+    main holds `base`, which the event recorded; the pull request branches off it and adds `branch`;
+    main then gains `main_later`. With `merge_ref`, HEAD merges the pull request into main as it is
+    now, as actions/checkout does. Without, HEAD is the pull request's own head after its branch
+    merged main, and origin/main is fetched.
     """
     path = Path(tempfile.mkdtemp(prefix="ep-fixture-"))
     git(path, "init", "-q", "-b", "main")
@@ -92,13 +99,19 @@ def merge_ref(base, branch, main_later):
     head = commit(path, branch)
     git(path, "checkout", "-q", "main")
     commit(path, main_later)
-    git(path, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+    if merge_ref:
+        git(path, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+    else:
+        git(path, "update-ref", "refs/remotes/origin/main", "main")
+        git(path, "checkout", "-q", "pr")
+        git(path, "merge", "-q", "--no-ff", "-m", "merge main", "main")
+        head = git(path, "rev-parse", "HEAD").strip()
     return path, event_base, head
 
 
 def row(markdown, name):
-    """The cells of a report table's row for `name`."""
-    line = next(line for line in markdown.splitlines() if line.startswith(f"| {name} |"))
+    """The cells of the one report table row for `name`; a second row for it is an error."""
+    [line] = [line for line in markdown.splitlines() if line.startswith(f"| {name} |")]
     return [cell.strip() for cell in line.strip("|").split("|")]
 
 
@@ -187,11 +200,87 @@ class Gate(unittest.TestCase):
         self.assertEqual(code, 1, status)
         self.assertRegex(status, r"^failed: npm ci rejects the repository's package files: exit \d+: \S")
 
+    def test_listed_goos_report_only_functions_dead_under_all_of_them(self):
+        base = {
+            ".github/quality.yml": "go:\n  goos: [linux, windows]\n",
+            "go.mod": GO["go.mod"],
+            "main.go": "package main\n\nfunc main() { run() }\n",
+            "run_windows.go": "package main\n\nfunc run() {}\n",
+            "run_other.go": "//go:build !windows\n\npackage main\n\nfunc run() {}\n",
+        }
+        head = {  # helper is called only from the non-windows build, so it ships in linux
+            "run_other.go": "//go:build !windows\n\npackage main\n\nfunc run() { helper() }\n",
+            "helper.go": "package main\n\nfunc helper() {}\n\nfunc unused() {}\n",
+        }
+        code, out = gate(base, head)
+        status, findings = result(out, "deadcode")
+        self.assertEqual(code, 1, status)
+        self.assertIn("helper.go:5: unreachable func: unused", findings)
+        self.assertNotIn("unreachable func: helper", findings)
+
     def test_go_code_that_does_not_load_fails(self):
         code, out = gate(GO, {"main.go": 'package main\n\nimport _ "example.com/fixture/missing"\n\nfunc main() {}\n'})
         status, _ = result(out, "deadcode")
         self.assertEqual(code, 1, status)
         self.assertRegex(status, r"^failed: deadcode cannot load the packages \(GOOS=windows\): exit \d+: \S")
+
+    def test_go_root_below_the_module_root_reports_its_dead_code(self):
+        base = {
+            ".github/quality.yml": "go:\n  root: cmd/app\n",
+            "go.mod": GO["go.mod"],
+            "cmd/app/main.go": "package main\n\nfunc main() {}\n",
+        }
+        code, out = gate(base, {"cmd/app/extra.go": "package main\n\nfunc unreachable() {}\n"})
+        status, findings = result(out, "deadcode")
+        self.assertEqual(code, 1, status)
+        self.assertIn("cmd/app/extra.go:3: unreachable func: unreachable", findings)
+
+    def test_go_check_in_a_symlinked_workspace_reports_dead_code(self):
+        path, base = repository(GO, {"main_windows.go": "package main\n\nfunc unreachable() {}\n"})
+        link = Path(tempfile.mkdtemp(prefix="ep-link-")) / "workspace"
+        link.symlink_to(path)
+        proc, out = run(link, base, str(SCRIPTS / "checks.sh"), "gate", PWD=str(link))
+        status, findings = result(out, "deadcode")
+        self.assertEqual(proc.returncode, 1, status)
+        self.assertIn("main_windows.go:3: unreachable func: unreachable", findings)
+
+    def test_spent_time_budget_leaves_a_download_not_run(self):
+        tools = tempfile.mkdtemp(prefix="ep-tools-")  # empty, so reviewdog must be downloaded
+        code, out = gate(JS, {"web/src/note.ts": "x\n"}, EP_BUDGET="0", EP_TOOLS=tools)
+        status, _ = result(out, "knip")
+        self.assertEqual(code, 0, status)
+        self.assertEqual(status, "not run: cannot install reviewdog: time budget of 0s used up")
+
+    def test_spent_time_budget_is_neutral_and_reported(self):
+        code, out = gate(
+            JS, {"web/src/util.ts": UTIL + "\nexport function addedDead() {\n  return 3;\n}\n"}, EP_BUDGET="0"
+        )
+        status, _ = result(out, "knip")
+        self.assertEqual(code, 0, status)
+        self.assertRegex(status, r"^not run: .*time budget of 0s used up$")
+
+    def test_go_mod_that_does_not_parse_fails(self):
+        code, out = gate(GO, {"go.mod": GO["go.mod"] + "\nbogus directive\n"})
+        status, _ = result(out, "deadcode")
+        self.assertEqual(code, 1, status)
+        self.assertRegex(status, r"^failed: go.mod does not parse: go.mod:\d+: unknown directive: bogus")
+
+    def test_added_unused_python_import_fails(self):
+        code, out = gate(PY, {"src/app.py": "import json\n" + PY["src/app.py"]})
+        status, findings = result(out, "ruff")
+        self.assertEqual(code, 1, status)
+        self.assertIn("src/app.py:1: `json` imported but unused", findings)
+
+    def test_added_undefined_python_name_fails(self):
+        code, out = gate(PY, {"src/app.py": PY["src/app.py"].replace("sys.argv", "sys.argv, missing")})
+        status, findings = result(out, "ruff")
+        self.assertEqual(code, 1, status)
+        self.assertIn("src/app.py:4: Undefined name `missing`", findings)
+
+    def test_edit_beside_old_unused_python_import_passes(self):
+        code, out = gate(PY, {"src/app.py": PY["src/app.py"].replace("import sys", "import sys  # arguments")})
+        self.assertIn("`os` imported but unused", (out / "ruff.sarif").read_text())  # ruff still reports it
+        self.assertEqual((code, result(out, "ruff")[0]), (0, "passed"))
 
     def test_go_module_download_failure_is_neutral(self):
         # A required module whose host cannot resolve, fetched directly rather than through the proxy.
@@ -211,33 +300,50 @@ class Gate(unittest.TestCase):
 
 
 class Base(unittest.TestCase):
-    def test_base_branch_commits_after_the_pull_request_opened_are_not_its_lines(self):
+    """main gains an unused export and a file after the pull request opens; only its own line counts."""
+
+    def check_only_the_pull_requests_line_counts(self, merge_ref):
         base = {**JS, ".github/quality.yml": JS[".github/quality.yml"] + "classes:\n  product: ['web/src/*']\n"}
         main_later = {
             "web/src/util.ts": UTIL + "\nexport function mainDead() {\n  return 4;\n}\n",
             "web/src/more.ts": "1\n2\n",
         }
         branch = {"web/src/index.ts": JS["web/src/index.ts"] + 'console.log("pull request");\n'}
-        path, event_base, head = merge_ref(base, branch, main_later)
-        proc, out = run(path, event_base, str(SCRIPTS / "checks.sh"), "gate", EP_HEAD=head)
+        path, event_base, head = main_moved_on(base, branch, main_later, merge_ref)
+        proc, out = run(path, event_base, str(SCRIPTS / "checks.sh"), "gate", EP_HEAD=head, EP_BASE_REF="main")
         report, _ = run(path, event_base, "python3", str(SCRIPTS / "report.py"), EP_OUT=str(out))
         self.assertIn("mainDead", (out / "knip.sarif").read_text())  # knip reports main's new dead code on HEAD
         self.assertEqual((proc.returncode, result(out, "knip")[0]), (0, "passed"))
         self.assertEqual(row(report.stdout, "product"), ["product", "1", "1", "0"])  # only the pull request's line
 
+    def test_on_the_merge_ref(self):
+        self.check_only_the_pull_requests_line_counts(merge_ref=True)
+
+    def test_on_a_head_whose_branch_merged_main(self):
+        self.check_only_the_pull_requests_line_counts(merge_ref=False)
+
 
 class Report(unittest.TestCase):
+    def report(self, base, head):
+        path, base_commit = repository(base, head)
+        _, out = run(path, base_commit, str(SCRIPTS / "checks.sh"), "gate")
+        return run(path, base_commit, "python3", str(SCRIPTS / "report.py"), EP_OUT=str(out))[0].stdout
+
     def test_reports_proof_weight_per_class(self):
         config = "classes:\n  tests: ['tests/*']\n  product: ['src/*']\n"
         base = {".github/quality.yml": config, "src/app.py": "x = 1\n"}
         head = {"src/app.py": "x = 2\ny = 3\n", "tests/test_app.py": "a\nb\nc\n", "notes.txt": "n\n"}
-        path, base_commit = repository(base, head)
-        _, out = run(path, base_commit, str(SCRIPTS / "checks.sh"), "gate")
-        proc, _ = run(path, base_commit, "python3", str(SCRIPTS / "report.py"), EP_OUT=str(out))
-        self.assertEqual(row(proc.stdout, "product"), ["product", "1", "2", "1"])
-        self.assertEqual(row(proc.stdout, "tests"), ["tests", "1", "3", "0"])
-        self.assertEqual(row(proc.stdout, "unclassified"), ["unclassified", "1", "1", "0"])
-        self.assertIn("Product +2 lines against proof +3 lines (tests)", proc.stdout)
+        report = self.report(base, head)
+        self.assertEqual(row(report, "product"), ["product", "2", "3", "1"])  # notes.txt matches no class
+        self.assertEqual(row(report, "tests"), ["tests", "1", "3", "0"])
+        self.assertIn("Product +3 lines against proof +3 lines (tests)", report)
+
+    def test_lockfiles_count_as_generated_even_under_a_product_glob(self):
+        config = "classes:\n  tests: ['tests/*']\n  product: ['web/*']\n"
+        base = {".github/quality.yml": config, "web/package-lock.json": "{\n}\n"}
+        report = self.report(base, {"web/package-lock.json": '{\n  "a": 1,\n  "b": 2\n}\n', "src/app.ts": "a\nb\n"})
+        self.assertEqual(row(report, "generated"), ["generated", "1", "2", "0"])
+        self.assertIn("Product +2 lines against proof +0 lines", report)
 
 
 if __name__ == "__main__":
