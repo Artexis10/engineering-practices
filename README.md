@@ -90,7 +90,8 @@ declaration line of an export, function or import that was already unused still 
 counts as added: delete it, or leave that line alone. A moved line counts as added too, so moving an old
 unused import fails: delete it, or run `ruff check --fix`. ShellCheck runs only on the shell scripts the
 pull request adds or changes: `*.sh` and `*.bash` files, and files whose first line is a `sh`, `bash`,
-`dash` or `ksh` shebang.
+`dash` or `ksh` shebang. It skips templates (`*.j2`, `*.jinja`, `*.jinja2`, `*.tmpl`, `*.tpl`), because
+a rendered template is not the file in the repository, and any path `shellcheck.exclude` matches.
 
 **ruff and the repository's own config.** The gate runs `ruff check --select F`, which replaces the rule
 selection in the repository's ruff config, a global `ignore` of F codes included: silence those with
@@ -178,6 +179,8 @@ eslint:                # turns on the ESLint gate: the repository's own ESLint, 
 
 shellcheck:            # turns on the ShellCheck gate for the shell scripts a pull request changes
   args: ["--exclude=SC1091"]   # options for shellcheck after --severity=warning (default none)
+  exclude: ["**/vendor/*"]     # glob patterns on repository-relative paths to skip, where `*` also matches `/`
+                               # and a leading `**/` also matches at the root; args and exclude take a string too
 
 duplicates:            # the jscpd measure (exact token clones) always runs
   paths: ["src"]       # default ["."]; .gitignore is respected

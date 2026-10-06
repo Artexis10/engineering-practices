@@ -353,6 +353,21 @@ class Gate(unittest.TestCase):
             findings, "my script.sh:2: warning: Use 'cd ... || exit' or 'cd ... || return' in case cd fails. [SC2164]\n"
         )
 
+    def test_shellcheck_skips_templates_and_excluded_paths_but_checks_other_scripts(self):
+        # A string is a one-item list, and a leading **/ also matches at the root.
+        config = "shellcheck:\n  exclude: '**/vendor/*'\n"
+        head = {
+            "deploy.sh.j2": "#!/usr/bin/env bash\necho {{ var }}\n",  # a template, not the script that runs
+            "vendor/lib.sh": "#!/bin/sh\ncd /tmp\n",
+            "run.sh": "#!/bin/sh\ncd /tmp\n",
+        }
+        code, out = gate({".github/quality.yml": config}, head)
+        status, findings = result(out, "shellcheck")
+        self.assertEqual(code, 1, status)
+        self.assertEqual(
+            findings, "run.sh:2: warning: Use 'cd ... || exit' or 'cd ... || return' in case cd fails. [SC2164]\n"
+        )
+
     def test_go_module_download_failure_is_neutral(self):
         # A required module whose host cannot resolve, fetched directly rather than through the proxy.
         head = {"go.mod": GO["go.mod"] + "\nrequire example.invalid/dep v1.0.0\n"}
