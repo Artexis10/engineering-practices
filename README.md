@@ -76,7 +76,8 @@ jobs would. So check out with
 to the report step only), and run it on `pull_request`; the action refuses `pull_request_target`,
 which would hand that code a write token and the repository's secrets. That code can still write
 `$GITHUB_ENV` and `$GITHUB_PATH` and so reach the report step, which holds the job's token; this matters
-for Dependabot runs, which get the permissions the job declares.
+for Dependabot runs, which get the permissions the job declares. The fix, not yet done, is to run the
+report in a separate job that executes no repository code.
 
 **What counts as added.** A finding fails the gate only on a line the pull request adds, measured against
 the base branch as it is now: on the merge ref that `actions/checkout` checks out, that is HEAD's first
@@ -99,12 +100,16 @@ pinned ruff cannot load fails the gate on purpose, so keep it compatible with th
 `tools/requirements.txt`.
 
 **Linters and their own config.** ESLint runs as `eslint --format json <args>` in `eslint.root`, with
-the repository's config. Only errors count, so a rule set to `warn` does not fail. staticcheck runs the
+the repository's config. Only errors count, so a rule set to `warn` does not fail. ESLint only warns
+about a file that no config object matches, so a config that matches no file passes silently: check
+that `eslint.root` and `args` reach the files you expect. staticcheck runs the
 checks the repository's `staticcheck.conf` selects and honours `//lint:ignore`. Its findings go through
 the same per-GOOS rule and `go.ignore` as deadcode. staticcheck builds with the build tags in `GOFLAGS`,
 while deadcode ignores them. ShellCheck reads `.shellcheckrc` and `# shellcheck disable=` comments.
 The action runs it with `--severity=warning`, so only warnings and errors count; notes and style
 findings, such as SC2086 quoting, do not. A `--severity` in `shellcheck.args` comes later and wins.
+A Go file whose path contains a space or a colon does not match the diff, so deadcode and staticcheck
+findings in it are dropped.
 
 **Time.** The action has one time budget, `EP_BUDGET` seconds (default 600), from the start of its first
 step. Each download and each tool runs for at most 600 seconds or what is left of the budget, and a step

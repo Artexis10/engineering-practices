@@ -41,7 +41,8 @@ export GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false"
 
 mode=${1:-}
 case $mode in
-  gate) checks=(knip deadcode ruff eslint staticcheck shellcheck) ;;
+  # Cheapest first, so a slow npm install or Go build cannot leave the quick checks without budget.
+  gate) checks=(ruff shellcheck knip eslint deadcode staticcheck) ;;
   measures) checks=(jscpd vulture) ;;
   *) echo "usage: checks.sh gate|measures" >&2; exit 2 ;;
 esac
@@ -405,12 +406,19 @@ check_shellcheck() {
   fi
   # Warnings and errors only by default: notes and style must not fail. A repository can lower it
   # with a --severity in its args, which comes later and wins.
-  bounded "$sc" --format=gcc --severity=warning "${args[@]}" -- "${files[@]}" > "$out/shellcheck.txt" 2> "$out/shellcheck.err"
+  bounded "$sc" --format=json1 --severity=warning "${args[@]}" -- "${files[@]}" > "$out/shellcheck.json" 2> "$out/shellcheck.err"
   rc=$? # 1 means it found something; 3 and 4 mean shellcheck.args in quality.yml are broken
   [ "$rc" != 3 ] && [ "$rc" != 4 ] ||
     { say shellcheck "failed: shellcheck rejects shellcheck.args in .github/quality.yml: $(why "$rc" "$out/shellcheck.err")"; return; }
   [ "$rc" -le 1 ] || { say shellcheck "not run: shellcheck $(why "$rc" "$out/shellcheck.err")"; return; }
-  filter shellcheck . error -efm='%f:%l:%c: %m' < "$out/shellcheck.txt"
+  # JSON rather than an errorformat, so a file name with a space or a newline stays whole.
+  jq -c '.comments[] | {
+      message: "\(.level): \(.message) [SC\(.code)]",
+      location: {path: .file, range: {start: {line: .line, column: .column}}},
+      severity: "ERROR"
+    }' "$out/shellcheck.json" > "$out/shellcheck.all.rdjsonl" 2> "$out/shellcheck.err" ||
+    { rc=$?; say shellcheck "not run: cannot read shellcheck's output: $(why "$rc" "$out/shellcheck.err")"; return; }
+  filter shellcheck . error -f=rdjsonl < "$out/shellcheck.all.rdjsonl"
 }
 
 check_jscpd() {
@@ -465,7 +473,12 @@ check_vulture() {
     "$out/vulture.err" | sed 's#^\./##' | sort -u > "$out/vulture.unread"
   [ "$rc" = 0 ] || [ "$rc" = 3 ] || { [ "$rc" = 1 ] && [ -s "$out/vulture.unread" ]; } ||
     { say vulture "not run: vulture $(why "$rc" "$out/vulture.err")"; return; }
-  filter vulture . none -efm='%f:%l: %m' < "$out/vulture.txt"
+  # Converted to JSON rather than read with an errorformat, so a path with a space stays whole.
+  jq -cR 'capture("^(?<path>.+?):(?<line>[0-9]+): (?<message>.*)$")
+    | {message, location: {path, range: {start: {line: (.line | tonumber)}}}}' \
+    "$out/vulture.txt" > "$out/vulture.all.rdjsonl" 2> "$out/vulture.err" ||
+    { rc=$?; say vulture "not run: cannot read vulture's output: $(why "$rc" "$out/vulture.err")"; return; }
+  filter vulture . none -f=rdjsonl < "$out/vulture.all.rdjsonl"
   # The measure is partial when a file it could not read is one this pull request changes.
   unread=$(git diff --text --name-only "$mb" HEAD | grep -Fxf "$out/vulture.unread" | paste -sd, - | sed 's/,/, /g')
   [ -z "$unread" ] || grep -q '^not run' "$out/vulture.status" ||

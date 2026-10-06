@@ -341,9 +341,17 @@ class Gate(unittest.TestCase):
         head = {"run.sh": "#!/bin/sh\ncd /tmp\necho started\n", "deploy": "#!/usr/bin/env bash\necho $1\ncd /srv\n"}
         code, out = gate(base, head)
         status, findings = result(out, "shellcheck")
-        self.assertIn("run.sh:2:1:", (out / "shellcheck.txt").read_text())  # still reported
+        self.assertIn('"file":"run.sh","line":2,', (out / "shellcheck.json").read_text())  # still reported
         self.assertEqual(code, 1, status)
         self.assertEqual(findings, "deploy:3: warning: Use 'cd ... || exit' or 'cd ... || return' in case cd fails. [SC2164]\n")
+
+    def test_added_shellcheck_warning_in_a_file_name_with_a_space_fails(self):
+        code, out = gate({".github/quality.yml": "shellcheck:\n"}, {"my script.sh": "#!/bin/sh\ncd /tmp\n"})
+        status, findings = result(out, "shellcheck")
+        self.assertEqual(code, 1, status)
+        self.assertEqual(
+            findings, "my script.sh:2: warning: Use 'cd ... || exit' or 'cd ... || return' in case cd fails. [SC2164]\n"
+        )
 
     def test_go_module_download_failure_is_neutral(self):
         # A required module whose host cannot resolve, fetched directly rather than through the proxy.
