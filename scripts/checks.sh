@@ -385,14 +385,21 @@ check_eslint() {
 }
 
 check_shellcheck() {
-  local rc file first sc=$tools/shellcheck-$SHELLCHECK files=() args=()
+  local rc file first pattern sc=$tools/shellcheck-$SHELLCHECK files=() args=() exclude=()
   local shebang='^#!.*[/[:space:]](sh|bash|dash|ksh)([[:space:]]|$)'
   enabled shellcheck || { say shellcheck "not configured"; return; }
   mapfile -t args < <(cfg '.shellcheck.args // [] | .[]')
+  mapfile -t exclude < <(cfg '.shellcheck.exclude // [] | .[]')
   # Only the shell scripts this pull request adds or changes can have added lines: *.sh and *.bash
-  # files, and files whose first line is a shebang for a shell ShellCheck checks.
+  # files, and files whose first line is a shebang for a shell ShellCheck checks. A template is not
+  # the script that runs, so it is skipped, as is a path shellcheck.exclude matches (* also matches /).
   while IFS= read -r -d '' file; do
     [ -f "$file" ] && [ ! -L "$file" ] || continue
+    case $file in *.j2 | *.jinja | *.jinja2 | *.tmpl | *.tpl) continue ;; esac
+    for pattern in "${exclude[@]}"; do
+      # shellcheck disable=SC2053 # the pattern is a glob on purpose
+      [[ $file != $pattern ]] || continue 2
+    done
     first=$(head -c 200 -- "$file" | tr -d '\0' | head -n1)
     if [[ $file == *.sh || $file == *.bash || $first =~ $shebang ]]; then files+=("$file"); fi
   done < <(git diff --text -z --name-only --diff-filter=d "$mb" HEAD)
