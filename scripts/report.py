@@ -28,7 +28,7 @@ MEASURES = [
     ("jscpd", "New duplicate code, exact token clones (jscpd)"),
     ("vulture", "Python definitions nothing references (vulture, confidence 60+)"),
 ]
-NOT_PROOF = {"product", "docs", "unclassified"}  # every other path class counts as proof
+NOT_PROOF = {"product", "docs"}  # every other path class counts as proof
 SHOWN = 30  # findings listed per check
 SAMPLES, MINIMUM = 5, 3  # main runs in the runtime median; fewer than MINIMUM is not comparable
 
@@ -112,7 +112,7 @@ def proof_weight(config, base):
             i += 1
         else:  # a rename: the old path, then the new one
             path, i = fields[i + 2], i + 3
-        name = next((c for c, globs in classes.items() if any(matches(path, g) for g in globs)), "unclassified")
+        name = next((c for c, globs in classes.items() if any(matches(path, g) for g in globs)), "product")
         row = totals.setdefault(name, [0, 0, 0, 0])
         row[0] += 1
         if added == "-":
@@ -123,25 +123,22 @@ def proof_weight(config, base):
     if not totals:
         return ["No files changed against the base."]
     lines = ["| Class | Files | Lines added | Lines removed |", "|---|---:|---:|---:|"]
-    for name in [c for c in [*classes, "unclassified"] if c in totals]:
+    for name in [c for c in [*classes, "product"] if c in totals]:
         files, added, removed, binary = totals[name]
         files = f"{files} ({binary} binary, lines not counted)" if binary else files
         lines.append(f"| {cell(name)} | {files} | {added} | {removed} |")
     proof = [c for c in totals if c not in NOT_PROOF]
-    if "product" not in classes:
-        lines += ["", "No `product` class in `.github/quality.yml`, so product against proof is not computed."]
-    else:
-        product = totals.get("product", [0, 0])[1]
-        proof_added = sum(totals[c][1] for c in proof)
-        lines += [
-            "",
-            (
-                f"Product +{product} lines against proof +{proof_added} lines"
-                f" ({cell(', '.join(proof)) or 'no proof classes changed'})."
-            ),
-            "Proof that outweighs the product it covers needs a reason in review.",
-        ]
-    return lines
+    product = totals.get("product", [0, 0])[1]
+    proof_added = sum(totals[c][1] for c in proof)
+    return lines + [
+        "",
+        (
+            f"Product +{product} lines against proof +{proof_added} lines"
+            f" ({cell(', '.join(proof)) or 'no proof classes changed'})."
+        ),
+        "A file that matches no class counts as product.",
+        "Proof that outweighs the product it covers needs a reason in review.",
+    ]
 
 
 def seconds(job):

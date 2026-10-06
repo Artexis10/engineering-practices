@@ -256,16 +256,15 @@ class Base(unittest.TestCase):
 
 class Report(unittest.TestCase):
     def test_reports_proof_weight_per_class(self):
-        config = "classes:\n  tests: ['tests/*']\n  product: ['src/*']\n"
+        config = "classes:\n  tests: ['tests/*']\n"
         base = {".github/quality.yml": config, "src/app.py": "x = 1\n"}
         head = {"src/app.py": "x = 2\ny = 3\n", "tests/test_app.py": "a\nb\nc\n", "notes.txt": "n\n"}
         path, base_commit = repository(base, head)
         _, out = run(path, base_commit, str(SCRIPTS / "checks.sh"), "gate")
         proc, _ = run(path, base_commit, "python3", str(SCRIPTS / "report.py"), EP_OUT=str(out))
-        self.assertEqual(row(proc.stdout, "product"), ["product", "1", "2", "1"])
+        self.assertEqual(row(proc.stdout, "product"), ["product", "2", "3", "1"])  # notes.txt matches no class
         self.assertEqual(row(proc.stdout, "tests"), ["tests", "1", "3", "0"])
-        self.assertEqual(row(proc.stdout, "unclassified"), ["unclassified", "1", "1", "0"])
-        self.assertIn("Product +2 lines against proof +3 lines (tests)", proc.stdout)
+        self.assertIn("Product +3 lines against proof +3 lines (tests)", proc.stdout)
 
 
 if __name__ == "__main__":

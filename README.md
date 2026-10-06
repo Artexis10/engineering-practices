@@ -90,20 +90,25 @@ reported on its added lines too.
 Every key is optional. A language key that is absent turns its check off, and the report shows it as
 "not configured".
 
+**Path classes default to product.** A path belongs in a proof class (tests, fixtures, eval, scripts,
+tooling or another name you choose) only if it never runs in a build, deploy, image, scheduled job or
+runtime import, and never ships in a bundle. A deploy or migration script, a data-changing script, or a
+mock that ships in the production bundle is product. Name proof tooling by file or by a narrow glob,
+never a whole `scripts/` directory.
+
 ```yaml
 # Path classes for proof weight. Patterns are glob patterns on repository-relative paths, where `*`
 # also matches `/` (so `*.test.ts` matches at any depth). A file takes the first class, in the order
-# listed, whose pattern matches; a file matching none is counted as "unclassified". Class names are
-# free-form; every class except product and docs counts as proof.
+# listed, whose pattern matches; a file matching none counts as product. Class names are free-form;
+# every class except product and docs counts as proof.
 classes:
   fixtures: ["tests/fixtures/*"]
   tests: ["tests/*", "*.test.ts"]
   eval: ["eval/*"]
-  scripts: ["scripts/*"]
+  scripts: ["scripts/lint-*.sh", "scripts/new-fixture.py"]   # dev-only, by name
   specs: ["openspec/*"]
-  tooling: [".github/*", ".pre-commit-config.yaml"]   # CI, lint, hook and agent config
+  tooling: [".github/*", ".pre-commit-config.yaml"]          # CI, lint, hook and agent config
   docs: ["*.md"]
-  product: ["src/*"]
 
 javascript:            # turns on the knip gate
   root: frontend       # directory with package.json (default "."); `npm ci --ignore-scripts` runs there
