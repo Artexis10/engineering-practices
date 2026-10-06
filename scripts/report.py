@@ -120,7 +120,7 @@ def proof_weight(config, base):
             row[1] += int(added)
             row[2] += int(removed)
     if not totals:
-        return ["No files changed against the merge base."]
+        return ["No files changed against the base."]
     lines = ["| Class | Files | Lines added | Lines removed |", "|---|---:|---:|---:|"]
     for name in [c for c in [*classes, "unclassified"] if c in totals]:
         files, added, removed, binary = totals[name]
@@ -214,7 +214,7 @@ def render():
     config = config if isinstance(config, dict) else {}
     base = read("merge_base")
     head = git("rev-parse", "--short", "HEAD").stdout.strip()
-    against = f"against merge base `{base[:7]}`" if base else "with no merge base"
+    against = f"against base `{base[:7]}`" if base else "with no base"
     return "\n".join(
         [
             MARKER,
@@ -233,7 +233,7 @@ def render():
             "",
             "### Proof weight",
             "",
-            "Lines added and removed per path class, from `git diff --numstat` against the merge base.",
+            "Lines added and removed per path class, from `git diff --numstat` against the base.",
             "",
             *proof_weight(config, base),
             "",

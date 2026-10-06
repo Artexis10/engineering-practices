@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2329 # the check_* functions are called as "check_$check"
 # Run the dead-code gate or the review measures on the repository in the
-# current directory, over the diff between the merge base and HEAD.
+# current directory, over the diff between the pull request's base and HEAD.
 #
 #   checks.sh gate       knip (TS/JS) and deadcode (Go); exits 1 when either
 #                        reports a finding on a line the diff adds, or reports
@@ -16,7 +16,7 @@
 # every merge. Input the repository owns (quality.yml, its lockfile, its code
 # and its knip configuration) fails the gate when it is broken.
 #
-# Environment: EP_BASE (the pull request's base commit), EP_OUT and EP_TOOLS
+# Environment: EP_BASE and EP_HEAD (the pull request's base and head commits), EP_OUT and EP_TOOLS
 # (default under $RUNNER_TEMP). Needs bash, git, curl, jq and python3; node for
 # knip and jscpd; go for deadcode. Linux x86_64 only.
 set -uo pipefail
@@ -67,10 +67,10 @@ fetch() {
   mv "$3.part" "$3"
 }
 
-# setup: install reviewdog and yq, read the config, find the merge base. On failure
+# setup: install reviewdog and yq, read the config, find the base commit. On failure
 # prints the reason and returns 1, or 2 when the repository's config is broken.
 setup() {
-  local rc err=$out/setup.err
+  local rc second err=$out/setup.err
   [ "$(uname -sm)" = "Linux x86_64" ] || { echo "the runner is $(uname -sm); the action supports Linux x86_64"; return 1; }
   if [ ! -x "$rd" ]; then
     { fetch "https://github.com/reviewdog/reviewdog/releases/download/v$REVIEWDOG/reviewdog_${REVIEWDOG}_Linux_x86_64.tar.gz" \
@@ -85,8 +85,16 @@ setup() {
   "$yq" -o=json . .github/quality.yml > "$out/config.json" 2> "$err" ||
     { rc=$?; echo ".github/quality.yml does not parse: $(why "$rc" "$err")"; return 2; }
   [ -n "${EP_BASE:-}" ] || { echo "no pull request base commit; the action runs on pull_request events"; return 1; }
-  git merge-base "$EP_BASE" HEAD > "$out/merge_base" 2> "$err" ||
-    { rc=$?; echo "no merge base with $EP_BASE ($(why "$rc" "$err")); check out with fetch-depth: 0"; return 1; }
+  # On the pull request's merge ref (what actions/checkout checks out), HEAD merges the head into the base
+  # branch as it is now, while the event's base commit can be older; diffing against it would count the
+  # base branch's later commits as the pull request's. So the base is HEAD's first parent there.
+  second=$(git rev-parse -q --verify 'HEAD^2' 2> /dev/null)
+  if [ -n "$second" ] && [ "$second" = "$(git rev-parse -q --verify "${EP_HEAD:-}^{commit}" 2> /dev/null)" ]; then
+    git rev-parse 'HEAD^1' > "$out/merge_base"
+  else
+    git merge-base "$EP_BASE" HEAD > "$out/merge_base" 2> "$err" ||
+      { rc=$?; echo "no merge base with $EP_BASE ($(why "$rc" "$err")); check out with fetch-depth: 0"; return 1; }
+  fi
 }
 
 # node_tools: install knip and jscpd exactly as tools/package-lock.json pins them
