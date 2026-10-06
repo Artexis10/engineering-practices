@@ -28,7 +28,12 @@ MEASURES = [
     ("jscpd", "New duplicate code, exact token clones (jscpd)"),
     ("vulture", "Python definitions nothing references (vulture, confidence 60+)"),
 ]
-NOT_PROOF = {"product", "docs"}  # every other path class counts as proof
+NOT_PROOF = {"product", "docs", "generated"}  # every other path class counts as proof
+# Lockfiles at any depth are "generated" unless a configured class matches them first.
+LOCKFILES = [
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb",
+    "Cargo.lock", "go.sum", "uv.lock", "poetry.lock", "Pipfile.lock", "composer.lock", "Gemfile.lock",
+]
 SHOWN = 30  # findings listed per check
 SAMPLES, MINIMUM = 5, 3  # main runs in the runtime median; fewer than MINIMUM is not comparable
 
@@ -112,7 +117,8 @@ def proof_weight(config, base):
             i += 1
         else:  # a rename: the old path, then the new one
             path, i = fields[i + 2], i + 3
-        name = next((c for c, globs in classes.items() if any(matches(path, g) for g in globs)), "product")
+        name = next((c for c, globs in classes.items() if any(matches(path, g) for g in globs)), None)
+        name = name or ("generated" if path.rsplit("/", 1)[-1] in LOCKFILES else "product")
         row = totals.setdefault(name, [0, 0, 0, 0])
         row[0] += 1
         if added == "-":
@@ -123,7 +129,7 @@ def proof_weight(config, base):
     if not totals:
         return ["No files changed against the base."]
     lines = ["| Class | Files | Lines added | Lines removed |", "|---|---:|---:|---:|"]
-    for name in [c for c in [*classes, "product"] if c in totals]:
+    for name in [c for c in dict.fromkeys([*classes, "generated", "product"]) if c in totals]:
         files, added, removed, binary = totals[name]
         files = f"{files} ({binary} binary, lines not counted)" if binary else files
         lines.append(f"| {cell(name)} | {files} | {added} | {removed} |")
@@ -136,7 +142,8 @@ def proof_weight(config, base):
             f"Product +{product} lines against proof +{proof_added} lines"
             f" ({cell(', '.join(proof)) or 'no proof classes changed'})."
         ),
-        "A file that matches no class counts as product.",
+        "A file that matches no class counts as product; generated files (lockfiles by default) and docs count"
+        " as neither.",
         "Proof that outweighs the product it covers needs a reason in review.",
     ]
 

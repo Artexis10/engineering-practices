@@ -110,8 +110,8 @@ def main_moved_on(base, branch, main_later, merge_ref):
 
 
 def row(markdown, name):
-    """The cells of a report table's row for `name`."""
-    line = next(line for line in markdown.splitlines() if line.startswith(f"| {name} |"))
+    """The cells of the one report table row for `name`; a second row for it is an error."""
+    [line] = [line for line in markdown.splitlines() if line.startswith(f"| {name} |")]
     return [cell.strip() for cell in line.strip("|").split("|")]
 
 
@@ -224,6 +224,25 @@ class Gate(unittest.TestCase):
         self.assertEqual(code, 1, status)
         self.assertRegex(status, r"^failed: deadcode cannot load the packages \(GOOS=windows\): exit \d+: \S")
 
+    def test_go_root_below_the_module_root_reports_its_dead_code(self):
+        base = {
+            ".github/quality.yml": "go:\n  root: cmd/app\n",
+            "go.mod": GO["go.mod"],
+            "cmd/app/main.go": "package main\n\nfunc main() {}\n",
+        }
+        code, out = gate(base, {"cmd/app/extra.go": "package main\n\nfunc unreachable() {}\n"})
+        status, findings = result(out, "deadcode")
+        self.assertEqual(code, 1, status)
+        self.assertIn("cmd/app/extra.go:3: unreachable func: unreachable", findings)
+
+    def test_spent_time_budget_is_neutral_and_reported(self):
+        code, out = gate(
+            JS, {"web/src/util.ts": UTIL + "\nexport function addedDead() {\n  return 3;\n}\n"}, EP_BUDGET="0"
+        )
+        status, _ = result(out, "knip")
+        self.assertEqual(code, 0, status)
+        self.assertRegex(status, r"^not run: .*time budget of 0s used up$")
+
     def test_go_mod_that_does_not_parse_fails(self):
         code, out = gate(GO, {"go.mod": GO["go.mod"] + "\nbogus directive\n"})
         status, _ = result(out, "deadcode")
@@ -289,16 +308,25 @@ class Base(unittest.TestCase):
 
 
 class Report(unittest.TestCase):
-    def test_reports_proof_weight_per_class(self):
-        config = "classes:\n  tests: ['tests/*']\n"
-        base = {".github/quality.yml": config, "src/app.py": "x = 1\n"}
-        head = {"src/app.py": "x = 2\ny = 3\n", "tests/test_app.py": "a\nb\nc\n", "notes.txt": "n\n"}
+    def report(self, base, head):
         path, base_commit = repository(base, head)
         _, out = run(path, base_commit, str(SCRIPTS / "checks.sh"), "gate")
-        proc, _ = run(path, base_commit, "python3", str(SCRIPTS / "report.py"), EP_OUT=str(out))
-        self.assertEqual(row(proc.stdout, "product"), ["product", "2", "3", "1"])  # notes.txt matches no class
-        self.assertEqual(row(proc.stdout, "tests"), ["tests", "1", "3", "0"])
-        self.assertIn("Product +3 lines against proof +3 lines (tests)", proc.stdout)
+        return run(path, base_commit, "python3", str(SCRIPTS / "report.py"), EP_OUT=str(out))[0].stdout
+
+    def test_reports_proof_weight_per_class(self):
+        config = "classes:\n  tests: ['tests/*']\n  product: ['src/*']\n"
+        base = {".github/quality.yml": config, "src/app.py": "x = 1\n"}
+        head = {"src/app.py": "x = 2\ny = 3\n", "tests/test_app.py": "a\nb\nc\n", "notes.txt": "n\n"}
+        report = self.report(base, head)
+        self.assertEqual(row(report, "product"), ["product", "2", "3", "1"])  # notes.txt matches no class
+        self.assertEqual(row(report, "tests"), ["tests", "1", "3", "0"])
+        self.assertIn("Product +3 lines against proof +3 lines (tests)", report)
+
+    def test_lockfiles_count_as_generated(self):
+        base = {".github/quality.yml": "classes:\n  tests: ['tests/*']\n", "web/package-lock.json": "{\n}\n"}
+        report = self.report(base, {"web/package-lock.json": '{\n  "a": 1,\n  "b": 2\n}\n', "src/app.ts": "a\nb\n"})
+        self.assertEqual(row(report, "generated"), ["generated", "1", "2", "0"])
+        self.assertIn("Product +2 lines against proof +0 lines", report)
 
 
 if __name__ == "__main__":

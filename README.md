@@ -47,6 +47,7 @@ Add one job to the repository's pull-request workflow:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0     # the merge base must be present
+          # Keep the default ref: on pull_request it is the merge ref the base is measured against.
           persist-credentials: false
       - uses: Artexis10/engineering-practices@v1
 ```
@@ -80,12 +81,19 @@ lines. On any other checkout it is the merge base with the base branch as fetche
 counts only when the pull request adds the file, and an unused dependency only when the merge base did
 not declare it, so editing an old unused file or bumping an old unused dependency passes. Editing the
 declaration line of an export, function or import that was already unused still fails, because that line
-counts as added: delete it, or leave that line alone.
+counts as added: delete it, or leave that line alone. A moved line counts as added too, so moving an old
+unused import fails: delete it, or run `ruff check --fix`.
 
 **ruff and the repository's own config.** The gate runs `ruff check --select F`, which replaces the rule
-selection in the repository's ruff config. Its `per-file-ignores` (for example `__init__.py = ["F401"]`
-for re-exports), its excludes and `# noqa` comments still apply. A Python file that does not parse is
-reported on its added lines too.
+selection in the repository's ruff config, a global `ignore` of F codes included: silence those with
+`per-file-ignores` (for example `__init__.py = ["F401"]` for re-exports) or `# noqa`, which still apply,
+as do excludes. A Python file that does not parse is reported on its added lines too. A ruff config the
+pinned ruff cannot load fails the gate on purpose, so keep it compatible with the version in
+`tools/requirements.txt`.
+
+**Time.** The action has one time budget, `EP_BUDGET` seconds (default 720), across its steps. Each tool
+runs for at most 600 seconds or what is left of the budget. A step that cannot start or finish within it
+reports "not run" and a warning, so the job ends inside the template's `timeout-minutes: 15`.
 
 ## `.github/quality.yml`
 
@@ -98,11 +106,16 @@ runtime import, and never ships in a bundle. A deploy or migration script, a dat
 mock that ships in the production bundle is product. Name proof tooling by file or by a narrow glob,
 never a whole `scripts/` directory.
 
+These lockfiles are "generated" at any depth unless a class you list matches them first:
+`package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock`, `bun.lockb`,
+`Cargo.lock`, `go.sum`, `uv.lock`, `poetry.lock`, `Pipfile.lock`, `composer.lock` and `Gemfile.lock`.
+
 ```yaml
 # Path classes for proof weight. Patterns are glob patterns on repository-relative paths, where `*`
 # also matches `/` (so `*.test.ts` matches at any depth). A file takes the first class, in the order
-# listed, whose pattern matches; a file matching none counts as product. Class names are free-form;
-# every class except product and docs counts as proof.
+# listed, whose pattern matches. A lockfile that matches none is "generated"; any other file that
+# matches none is product. Class names are free-form; every class except product, docs and generated
+# counts as proof, and generated and docs count as neither.
 classes:
   fixtures: ["tests/fixtures/*"]
   tests: ["tests/*", "*.test.ts"]
@@ -111,6 +124,7 @@ classes:
   specs: ["openspec/*"]
   tooling: [".github/*", ".pre-commit-config.yaml"]          # CI, lint, hook and agent config
   docs: ["*.md"]
+  generated: ["plugin/dist/*"]   # regenerated output; lockfiles are generated without listing them
 
 javascript:            # turns on the knip gate
   root: frontend       # directory with package.json (default "."); `npm ci --ignore-scripts` runs there
@@ -122,7 +136,8 @@ go:                    # turns on the deadcode gate
   root: .              # module directory (default ".")
   goos: [linux, windows]  # a GOOS or a list of them for deadcode (default linux); with several, a function
                           # is dead only if every GOOS that builds its file finds it unreachable
-  ignore:              # extended regular expressions; a finding line ("file:line:col: unreachable func: Name") that matches is dropped
+  ignore:              # extended regular expressions; a finding line ("file:line:col: unreachable func: Name",
+                       # file relative to the repository root) that matches is dropped
     - "unreachable func: OnSystemEvent$"
 
 python:                # turns on the ruff gate and the vulture measure

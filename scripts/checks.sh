@@ -29,6 +29,7 @@ REVIEWDOG=0.21.2 REVIEWDOG_SHA256=30413aa3c7443e9c3c157fe5766cad40e3bb39a32e210e
 YQ=4.54.1 YQ_SHA256=8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
 DEADCODE=0.51.0 # golang.org/x/tools; go install checks it against the Go checksum database
 TIMEOUT=600     # seconds, per tool command
+BUDGET=${EP_BUDGET:-720} # seconds for the whole action, so it ends inside a caller's timeout-minutes: 15
 
 mode=${1:-}
 case $mode in
@@ -41,6 +42,16 @@ out=${EP_OUT:-${RUNNER_TEMP:?}/engineering-practices/out}
 tools=${EP_TOOLS:-${RUNNER_TEMP:?}/engineering-practices/tools}
 mkdir -p "$out" "$tools"
 rd=$tools/reviewdog-$REVIEWDOG yq=$tools/yq-$YQ
+[ -s "$out/started" ] || date +%s > "$out/started" # the first run of the action starts the budget
+started=$(cat "$out/started")
+
+# bounded <command...>: run under the smaller of TIMEOUT and what is left of the budget;
+# exit 124, like timeout, when it runs out or is already spent
+bounded() {
+  local left=$((started + BUDGET - $(date +%s)))
+  [ "$left" -gt 0 ] || return 124
+  timeout "$((left < TIMEOUT ? left : TIMEOUT))" "$@"
+}
 
 # say <check> <status>: record a check's result, one line
 say() {
@@ -52,7 +63,10 @@ say() {
 
 # why <exit code> <stderr file>: one line saying why a command gave no result
 why() {
-  if [ "$1" = 124 ]; then echo "timed out after ${TIMEOUT}s"; return; fi
+  if [ "$1" = 124 ]; then
+    if [ $((started + BUDGET - $(date +%s))) -le 0 ]; then echo "time budget of ${BUDGET}s used up"; else echo "timed out after ${TIMEOUT}s"; fi
+    return
+  fi
   local line
   line=$({ grep -m1 -i error "$2" || head -n1 "$2"; } 2>/dev/null | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   echo "exit $1: ${line:-no output}"
@@ -108,7 +122,7 @@ node_tools() {
   dir=$tools/node-$(sha256sum < "$here/tools/package-lock.json" | cut -c1-12)
   [ -f "$dir/installed" ] && return
   mkdir -p "$dir" && cp "$here/tools/package.json" "$here/tools/package-lock.json" "$dir/" &&
-    timeout "$TIMEOUT" npm ci --ignore-scripts --no-audit --no-fund --prefix "$dir" > /dev/null && touch "$dir/installed"
+    bounded npm ci --ignore-scripts --no-audit --no-fund --prefix "$dir" > /dev/null && touch "$dir/installed"
 }
 node_bin() { echo "$tools/node-$(sha256sum < "$here/tools/package-lock.json" | cut -c1-12)/node_modules/.bin/$1"; }
 
@@ -118,7 +132,7 @@ python_tools() {
   venv=$(dirname "$(dirname "$(python_bin ruff)")")
   [ -f "$venv/installed" ] && return
   python3 -m venv "$venv" &&
-    timeout "$TIMEOUT" "$venv/bin/pip" install -q --require-hashes --only-binary=:all: \
+    bounded "$venv/bin/pip" install -q --require-hashes --only-binary=:all: \
       -r "$here/tools/requirements.txt" > /dev/null &&
     touch "$venv/installed"
 }
@@ -167,7 +181,7 @@ check_knip() {
   enabled javascript || { say knip "not configured"; return; }
   dir=$(cfg '.javascript.root // "."')
   if [ -f "$dir/package.json" ]; then
-    timeout "$TIMEOUT" env -C "$dir" npm ci --ignore-scripts --no-audit --no-fund > /dev/null 2> "$out/knip.err" || {
+    bounded env -C "$dir" npm ci --ignore-scripts --no-audit --no-fund > /dev/null 2> "$out/knip.err" || {
       rc=$?
       # A lockfile out of step with package.json, or one that does not parse, is the repository's own input.
       if grep -qE '^npm (ERR!|error) code (EUSAGE|EJSONPARSE)$' "$out/knip.err"; then
@@ -185,7 +199,7 @@ check_knip() {
   fi
   # knip's Lefthook plugin asks git for the hooks path; the machine's own git config (a global core.hooksPath)
   # would become entry globs outside the repository, so knip sees only the repository's config, as on a hosted runner.
-  timeout "$TIMEOUT" env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  bounded env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
     "$(node_bin knip)" --directory "$dir" "${config[@]}" --include files,exports,dependencies \
     --reporter sarif --no-progress > "$out/knip.sarif" 2> "$out/knip.err"
   rc=$? # 1 means it found unused code; 2 means the repository's configuration is broken
@@ -210,13 +224,13 @@ check_knip() {
 }
 
 check_deadcode() {
-  local dir goos rc gover bin moddir gooses=()
+  local dir absdir top goos rc gover bin gooses=()
   local each='{{$.Dir}}/{{.}}{{"\n"}}'
   enabled go || { say deadcode "not configured"; return; }
   dir=$(cfg '.go.root // "."')
   mapfile -t gooses < <(cfg '.go.goos // "linux" | if type == "array" then .[] else . end')
   # Download first (this also fetches any toolchain go.mod asks for): a network failure is "not run".
-  env -C "$dir" timeout "$TIMEOUT" go mod download 2> "$out/deadcode.err" || {
+  bounded env -C "$dir" go mod download 2> "$out/deadcode.err" || {
     rc=$?
     if grep -q 'errors parsing go.mod' "$out/deadcode.err"; then
       say deadcode "failed: go.mod does not parse: $(grep -m1 -A1 'errors parsing go.mod' "$out/deadcode.err" | tail -n1)"
@@ -230,26 +244,27 @@ check_deadcode() {
   gover=$(env -C "$dir" go env GOVERSION 2> "$out/deadcode.err") ||
     { rc=$?; say deadcode "not run: cannot tell which Go the module selects: $(why "$rc" "$out/deadcode.err")"; return; }
   bin=$tools/deadcode-$DEADCODE-$gover/deadcode
-  [ -x "$bin" ] || GOBIN=$(dirname "$bin") GOTOOLCHAIN=$gover+auto timeout "$TIMEOUT" \
+  [ -x "$bin" ] || bounded env GOBIN="$(dirname "$bin")" GOTOOLCHAIN="$gover+auto" \
     go install "golang.org/x/tools/cmd/deadcode@v$DEADCODE" 2> "$out/deadcode.err" ||
     { rc=$?; say deadcode "not run: cannot install deadcode with $gover: $(why "$rc" "$out/deadcode.err")"; return; }
-  moddir=$(dirname "$(env -C "$dir" go env GOMOD)")
+  # Both tools are matched on absolute paths: deadcode prints a file under its directory relative to
+  # it and any other file absolute, and go list prints absolute directories.
+  absdir=$(cd "$dir" && pwd -P)
+  top=$(git rev-parse --show-toplevel)
   : > "$out/deadcode.runs"
   for goos in "${gooses[@]}"; do
     # With the network off, a load failure is the repository's own code.
-    env -C "$dir" GOOS="$goos" GOPROXY=off timeout "$TIMEOUT" "$bin" -test ./... > "$out/deadcode.$goos.txt" 2> "$out/deadcode.err"
+    bounded env -C "$dir" GOOS="$goos" GOPROXY=off "$bin" -test ./... > "$out/deadcode.$goos.txt" 2> "$out/deadcode.err"
     rc=$?
     [ "$rc" != 124 ] || { say deadcode "not run: deadcode (GOOS=$goos) $(why "$rc" "$out/deadcode.err")"; return; }
     [ "$rc" = 0 ] || { say deadcode "failed: deadcode cannot load the packages (GOOS=$goos): $(why "$rc" "$out/deadcode.err")"; return; }
-    # The files this GOOS builds ("built<TAB>GOOS<TAB>path", relative to the module like deadcode's
-    # paths), then its findings ("dead<TAB>finding").
-    env -C "$dir" GOOS="$goos" GOPROXY=off go list -f \
+    # The files this GOOS builds, its packages' dependencies included ("built<TAB>GOOS<TAB>path"),
+    # then its findings ("dead<TAB>finding").
+    env -C "$dir" GOOS="$goos" GOPROXY=off go list -deps -test -f \
       "{{range .GoFiles}}$each{{end}}{{range .CgoFiles}}$each{{end}}{{range .TestGoFiles}}$each{{end}}{{range .XTestGoFiles}}$each{{end}}" \
-      ./... 2> "$out/deadcode.err" |
-      awk -v prefix="$moddir/" -v goos="$goos" 'index($0, prefix) == 1 { print "built\t" goos "\t" substr($0, length(prefix) + 1) }' \
-      >> "$out/deadcode.runs" ||
+      ./... 2> "$out/deadcode.err" | awk -v goos="$goos" '{ print "built\t" goos "\t" $0 }' >> "$out/deadcode.runs" ||
       { rc=$?; say deadcode "failed: go list cannot load the packages (GOOS=$goos): $(why "$rc" "$out/deadcode.err")"; return; }
-    sed 's/^/dead\t/' "$out/deadcode.$goos.txt" >> "$out/deadcode.runs"
+    awk -v dir="$absdir/" '{ print "dead\t" (index($0, "/") == 1 ? "" : dir) $0 }' "$out/deadcode.$goos.txt" >> "$out/deadcode.runs"
   done
   # A function is dead only if every GOOS that builds its file reports it: a helper in a shared file
   # called only from one platform's files is live in that platform's build.
@@ -262,12 +277,13 @@ check_deadcode() {
         for (g in gooses) need += ((g, part[1]) in built)
         if (hits[order[j]] == need) print order[j]
       }
-    }' "$out/deadcode.runs" > "$out/deadcode.txt"
+    }' "$out/deadcode.runs" | awk -v top="$top/" 'index($0, top) == 1 { $0 = substr($0, length(top) + 1) } { print }' \
+    > "$out/deadcode.txt"
   cfg '.go.ignore // [] | .[]' > "$out/deadcode.ignore"
   grep -Ev -f "$out/deadcode.ignore" "$out/deadcode.txt" > "$out/deadcode.kept" 2> "$out/deadcode.err"
   rc=$?
   [ "$rc" -le 1 ] || { say deadcode "failed: go.ignore in .github/quality.yml is not a valid regex list ($(why "$rc" "$out/deadcode.err"))"; return; }
-  filter deadcode "$dir" error -efm='%f:%l:%c: %m' < "$out/deadcode.kept"
+  filter deadcode . error -efm='%f:%l:%c: %m' < "$out/deadcode.kept"
 }
 
 check_jscpd() {
@@ -276,7 +292,7 @@ check_jscpd() {
   ignore=$(cfg '.duplicates.ignore // [] | join(",")')
   node_tools 2> "$out/jscpd.err" || { rc=$?; say jscpd "not run: cannot install jscpd: $(why "$rc" "$out/jscpd.err")"; return; }
   rm -rf "$out/jscpd"
-  timeout "$TIMEOUT" "$(node_bin jscpd)" --reporters sarif --output "$out/jscpd" ${ignore:+--ignore "$ignore"} \
+  bounded "$(node_bin jscpd)" --reporters sarif --output "$out/jscpd" ${ignore:+--ignore "$ignore"} \
     "${paths[@]}" > /dev/null 2> "$out/jscpd.err" ||
     { rc=$?; say jscpd "not run: jscpd $(why "$rc" "$out/jscpd.err")"; return; }
   # jscpd reports a clone once, at one of its copies; report it at both so an added copy survives the filter.
@@ -297,7 +313,7 @@ check_ruff() {
   done
   python_tools 2> "$out/ruff.err" || { rc=$?; say ruff "not run: cannot install ruff: $(why "$rc" "$out/ruff.err")"; return; }
   # --select F replaces the repository's rule selection; its per-file-ignores, excludes and noqa comments still apply.
-  timeout "$TIMEOUT" "$(python_bin ruff)" check --no-cache --select F --output-format sarif "${roots[@]}" \
+  bounded "$(python_bin ruff)" check --no-cache --select F --output-format sarif "${roots[@]}" \
     > "$out/ruff.sarif" 2> "$out/ruff.err"
   rc=$? # 1 means it found something; 2 means the repository's configuration or roots are broken
   [ "$rc" != 2 ] || { say ruff "failed: ruff reports a configuration error: $(why "$rc" "$out/ruff.err")"; return; }
@@ -315,7 +331,7 @@ check_vulture() {
   done
   python_tools 2> "$out/vulture.err" ||
     { rc=$?; say vulture "not run: cannot install vulture: $(why "$rc" "$out/vulture.err")"; return; }
-  timeout "$TIMEOUT" "$(python_bin vulture)" --min-confidence 60 "${args[@]}" "${roots[@]}" > "$out/vulture.txt" 2> "$out/vulture.err"
+  bounded "$(python_bin vulture)" --min-confidence 60 "${args[@]}" "${roots[@]}" > "$out/vulture.txt" 2> "$out/vulture.err"
   rc=$? # 3 means it found unused code; 1 also when it could not read a file
   # Files vulture could not read: a syntax error or a bad encoding.
   sed -nE "s/^(.+):[0-9]+: invalid syntax at .*/\1/p; s#^Error: Could not read file ($PWD/)?(.+) - \$#\2#p" \
