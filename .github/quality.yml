@@ -6,4 +6,6 @@ classes:
 python:
   roots: ["scripts"]
 
+shellcheck:
+
 test_jobs: ["fixtures"]

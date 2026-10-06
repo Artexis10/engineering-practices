@@ -1,11 +1,12 @@
 name: Engineering practices quality check
 description: >-
-  Fails a pull request that adds dead code (knip, deadcode) and posts a Quality
-  report that informs review. Configured by the caller's .github/quality.yml.
+  Fails a pull request that adds dead code (knip, deadcode, ruff) or lint findings
+  (ESLint, staticcheck, ShellCheck) and posts a Quality report that informs review.
+  Configured by the caller's .github/quality.yml.
 runs:
   using: composite
   steps:
-    # knip loads the pull request's own config files. Under pull_request_target that code would
+    # knip and ESLint load the pull request's own config files. Under pull_request_target that code would
     # run with a write token and the repository's secrets, so the action refuses that event.
     - name: Refuse pull_request_target
       if: github.event_name == 'pull_request_target'
@@ -13,7 +14,7 @@ runs:
       run: |
         echo "::error::Run this action on pull_request, not pull_request_target: it executes the pull request's code."
         exit 1
-    - name: Dead-code gate
+    - name: Gate
       if: github.event_name != 'pull_request_target'
       shell: bash
       run: '"$GITHUB_ACTION_PATH/scripts/checks.sh" gate'

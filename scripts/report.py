@@ -24,6 +24,9 @@ GATE = [
     ("knip", "Unused files, exports and dependencies (knip)"),
     ("deadcode", "Unreachable Go functions (deadcode)"),
     ("ruff", "Unused imports and variables, undefined names, redefinitions (ruff F rules)"),
+    ("eslint", "Lint errors (the repository's ESLint and config)"),
+    ("staticcheck", "Go bugs, simplifications and style (staticcheck)"),
+    ("shellcheck", "Shell script bugs (ShellCheck)"),
 ]
 MEASURES = [
     ("jscpd", "New duplicate code, exact token clones (jscpd)"),
@@ -258,14 +261,17 @@ def render():
             "## Quality report",
             "",
             (
-                f"`{head}` {against}. Only the dead-code gate fails this check; the rest informs review."
+                f"`{head}` {against}. Only the gate fails this check; the rest informs review."
                 f" Why each check exists: [PRACTICES.md]({REGISTRY})."
             ),
             *unknown_budget,
             "",
-            f"### Dead-code gate: {verdict()}",
+            f"### Gate: {verdict()}",
             "",
-            "Dead code on lines this pull request adds. Silence a false positive in `.github/quality.yml`.",
+            (
+                "Dead code and lint findings on lines this pull request adds. Silence a false positive in"
+                " `.github/quality.yml`, or in the linter's own config."
+            ),
             "",
             *checks(GATE),
             "",
