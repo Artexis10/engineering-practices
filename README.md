@@ -179,7 +179,8 @@ eslint:                # turns on the ESLint gate: the repository's own ESLint, 
 
 shellcheck:            # turns on the ShellCheck gate for the shell scripts a pull request changes
   args: ["--exclude=SC1091"]   # options for shellcheck after --severity=warning (default none)
-  exclude: ["vendor/*"]        # glob patterns on repository-relative paths to skip, where `*` also matches `/`
+  exclude: ["**/vendor/*"]     # glob patterns on repository-relative paths to skip, where `*` also matches `/`
+                               # and a leading `**/` also matches at the root; args and exclude take a string too
 
 duplicates:            # the jscpd measure (exact token clones) always runs
   paths: ["src"]       # default ["."]; .gitignore is respected

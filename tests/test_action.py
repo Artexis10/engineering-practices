@@ -354,7 +354,8 @@ class Gate(unittest.TestCase):
         )
 
     def test_shellcheck_skips_templates_and_excluded_paths_but_checks_other_scripts(self):
-        config = "shellcheck:\n  exclude: ['vendor/*']\n"
+        # A string is a one-item list, and a leading **/ also matches at the root.
+        config = "shellcheck:\n  exclude: '**/vendor/*'\n"
         head = {
             "deploy.sh.j2": "#!/usr/bin/env bash\necho {{ var }}\n",  # a template, not the script that runs
             "vendor/lib.sh": "#!/bin/sh\ncd /tmp\n",

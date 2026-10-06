@@ -388,17 +388,18 @@ check_shellcheck() {
   local rc file first pattern sc=$tools/shellcheck-$SHELLCHECK files=() args=() exclude=()
   local shebang='^#!.*[/[:space:]](sh|bash|dash|ksh)([[:space:]]|$)'
   enabled shellcheck || { say shellcheck "not configured"; return; }
-  mapfile -t args < <(cfg '.shellcheck.args // [] | .[]')
-  mapfile -t exclude < <(cfg '.shellcheck.exclude // [] | .[]')
+  mapfile -t args < <(cfg '.shellcheck.args // [] | if type == "array" then .[] else . end')
+  mapfile -t exclude < <(cfg '.shellcheck.exclude // [] | if type == "array" then .[] else . end')
   # Only the shell scripts this pull request adds or changes can have added lines: *.sh and *.bash
   # files, and files whose first line is a shebang for a shell ShellCheck checks. A template is not
-  # the script that runs, so it is skipped, as is a path shellcheck.exclude matches (* also matches /).
+  # the script that runs, so it is skipped, as is a path shellcheck.exclude matches (* also matches /,
+  # and a leading **/ also matches at the root, as in the path classes).
   while IFS= read -r -d '' file; do
     [ -f "$file" ] && [ ! -L "$file" ] || continue
     case $file in *.j2 | *.jinja | *.jinja2 | *.tmpl | *.tpl) continue ;; esac
     for pattern in "${exclude[@]}"; do
       # shellcheck disable=SC2053 # the pattern is a glob on purpose
-      [[ $file != $pattern ]] || continue 2
+      [[ $file != $pattern && $file != ${pattern#\*\*/} ]] || continue 2
     done
     first=$(head -c 200 -- "$file" | tr -d '\0' | head -n1)
     if [[ $file == *.sh || $file == *.bash || $first =~ $shebang ]]; then files+=("$file"); fi
