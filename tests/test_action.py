@@ -169,7 +169,7 @@ class Gate(unittest.TestCase):
         code, out = gate(GO, head, GOPRIVATE="example.invalid")
         status, _ = result(out, "deadcode")
         self.assertEqual(code, 0, status)
-        self.assertRegex(status, r"^not run: cannot download the Go modules: exit \d+: \S")
+        self.assertRegex(status, r"^not run: cannot download the Go modules or toolchain: exit \d+: \S")
 
     def test_tool_error_is_neutral_and_reported(self):
         # The registry is down and nothing is cached, so npm ci cannot install a dependency.

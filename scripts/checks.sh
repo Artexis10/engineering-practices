@@ -182,15 +182,21 @@ check_knip() {
 }
 
 check_deadcode() {
-  local dir goos rc bin=$tools/deadcode-$DEADCODE/deadcode
+  local dir goos rc gover bin
   enabled go || { say deadcode "not configured"; return; }
   dir=$(cfg '.go.root // "."')
   goos=$(cfg '.go.goos // "linux"')
-  [ -x "$bin" ] || GOBIN=$(dirname "$bin") timeout "$TIMEOUT" go install "golang.org/x/tools/cmd/deadcode@v$DEADCODE" 2> "$out/deadcode.err" ||
-    { rc=$?; say deadcode "not run: cannot install deadcode: $(why "$rc" "$out/deadcode.err")"; return; }
   # Download first (this also fetches any toolchain go.mod asks for): a network failure is "not run".
   env -C "$dir" timeout "$TIMEOUT" go mod download 2> "$out/deadcode.err" ||
-    { rc=$?; say deadcode "not run: cannot download the Go modules: $(why "$rc" "$out/deadcode.err")"; return; }
+    { rc=$?; say deadcode "not run: cannot download the Go modules or toolchain: $(why "$rc" "$out/deadcode.err")"; return; }
+  # deadcode type-checks with the Go it was built with, so build it with the Go this module selects
+  # (+auto lets it go newer if x/tools itself needs that).
+  gover=$(env -C "$dir" go env GOVERSION 2> "$out/deadcode.err") ||
+    { rc=$?; say deadcode "not run: cannot tell which Go the module selects: $(why "$rc" "$out/deadcode.err")"; return; }
+  bin=$tools/deadcode-$DEADCODE-$gover/deadcode
+  [ -x "$bin" ] || GOBIN=$(dirname "$bin") GOTOOLCHAIN=$gover+auto timeout "$TIMEOUT" \
+    go install "golang.org/x/tools/cmd/deadcode@v$DEADCODE" 2> "$out/deadcode.err" ||
+    { rc=$?; say deadcode "not run: cannot install deadcode with $gover: $(why "$rc" "$out/deadcode.err")"; return; }
   # With the network off, a load failure is the repository's own code.
   env -C "$dir" GOOS="$goos" GOPROXY=off timeout "$TIMEOUT" "$bin" -test ./... > "$out/deadcode.txt" 2> "$out/deadcode.err"
   rc=$?
