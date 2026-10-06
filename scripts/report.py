@@ -22,6 +22,7 @@ REGISTRY = "https://github.com/Artexis10/engineering-practices/blob/v1/PRACTICES
 GATE = [
     ("knip", "Unused files, exports and dependencies (knip)"),
     ("deadcode", "Unreachable Go functions (deadcode)"),
+    ("ruff", "Unused imports and variables, undefined names, redefinitions (ruff F rules)"),
 ]
 MEASURES = [
     ("jscpd", "New duplicate code, exact token clones (jscpd)"),
@@ -134,8 +135,10 @@ def proof_weight(config, base):
         proof_added = sum(totals[c][1] for c in proof)
         lines += [
             "",
-            f"Product +{product} lines against proof +{proof_added} lines"
-            f" ({cell(', '.join(proof)) or 'no proof classes changed'}).",
+            (
+                f"Product +{product} lines against proof +{proof_added} lines"
+                f" ({cell(', '.join(proof)) or 'no proof classes changed'})."
+            ),
             "Proof that outweighs the product it covers needs a reason in review.",
         ]
     return lines

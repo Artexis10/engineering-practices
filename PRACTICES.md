@@ -31,7 +31,7 @@ A practice whose only enforcers are review or instruction is listed under [Gaps]
 
 | ID | Practice | Source | Enforcer | Prevents | Wrong-fire cost | Who pays |
 |---|---|---|---|---|---|---|
-| C1 | No new dead code: no unused file, export or dependency (TS/JS) and no unreachable function (Go) on the lines a pull request adds. | [Hugo 10-05] | gate (knip, deadcode on added lines); report (vulture for Python); ruff F401/F841 for Python, added to CI during rollout where it is missing (q, together-unprocessed) | Dead weight that the 2026-10-05 audit removed by the thousand lines | An entry point the tool cannot see (framework file, dynamic dispatch) blocks the PR until an ignore entry lands in `.github/quality.yml`, where review sees it. Editing the declaration line of an export that was already unused also fails; the remedy is deleting it | Author agent, minutes |
+| C1 | No new dead code: no unused file, export or dependency (TS/JS), no unreachable function (Go), and no unused import or variable, undefined name or redefinition (Python) on the lines a pull request adds. | [Hugo 10-05] | gate (knip, deadcode, ruff's F rules on added lines); report (vulture for unreferenced Python definitions) | Dead weight that the 2026-10-05 audit removed by the thousand lines | An entry point the tool cannot see (framework file, dynamic dispatch) blocks the PR until an ignore entry lands in `.github/quality.yml`, where review sees it. Editing the declaration line of an export, function or import that was already unused also fails; the remedy is deleting it | Author agent, minutes |
 | C2 | DRY of knowledge in product code: one source for each rule, value or vendored file. A second copy needs an import, generator or dependency that keeps it in step, or names the change that deletes it. | [PragProg], DRY is about knowledge; [Hugo 10-01] | report (jscpd duplicate code, exact token clones, on added lines); review | Copies that drift apart | jscpd flags copies that encode different knowledge (boilerplate, DAMP tests); the reviewer dismisses it (see C3, T6) | Reviewer, seconds |
 | C3 | Prefer duplication over the wrong abstraction. Do not merge code that merely looks alike; inline an abstraction that has grown a parameter per caller. | [Metz] | review | Shared helpers bent to fit every caller | Real shared knowledge stays duplicated; the test is whether the copies encode the same rule (C2) | Reviewer, minutes |
 | C4 | Copying is not a justification, and new code sets the pattern the next change copies. Name an unsound existing pattern and propose a better shape. | [Hugo 10-01] | instruction | Unsound patterns spreading by imitation | The author spends minutes on a pattern that was fine | Author agent, minutes |
@@ -68,7 +68,8 @@ These practices have no automated enforcer; they rely on the author and the inde
   judge them), T5, T6, T7, T8, C3, W2, W3, K1, K3.
 - **Instruction only:** C4, K2, K4.
 - **Partly covered:** C1 does not catch a callee left dead when a pull request removes its caller in another
-  file; the monthly gardener sweeps that. Python has no dead-code gate, only the vulture measure and ruff.
+  file; the monthly gardener sweeps that. For Python the gate covers ruff's F rules only; unreferenced
+  definitions are the vulture measure, which a reviewer judges.
 
 An automated enforcer for a gap is welcome when it passes K1: what it prevents must outweigh what its
 wrong fires cost.

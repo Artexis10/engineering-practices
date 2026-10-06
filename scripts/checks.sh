@@ -3,9 +3,9 @@
 # Run the dead-code gate or the review measures on the repository in the
 # current directory, over the diff between the pull request's base and HEAD.
 #
-#   checks.sh gate       knip (TS/JS) and deadcode (Go); exits 1 when either
-#                        reports a finding on a line the diff adds, or reports
-#                        that the repository's own configuration is broken
+#   checks.sh gate       knip (TS/JS), deadcode (Go) and ruff's F rules (Python);
+#                        exits 1 when one reports a finding on a line the diff
+#                        adds, or reports that the repository's own input is broken
 #   checks.sh measures   jscpd and vulture; never fails
 #
 # Each check writes $EP_OUT/<check>.status ("passed", "failed: ...",
@@ -22,7 +22,7 @@
 set -uo pipefail
 
 # Pinned tools. knip and jscpd are pinned with their whole dependency tree by
-# tools/package-lock.json, vulture by tools/requirements.txt. Moving a version is
+# tools/package-lock.json, ruff and vulture by tools/requirements.txt. Moving a version is
 # a change to these files, gated by the fixture tests.
 REVIEWDOG=0.21.2 REVIEWDOG_SHA256=30413aa3c7443e9c3c157fe5766cad40e3bb39a32e210ee69b710a8d5c4b8e51
 YQ=4.54.1 YQ_SHA256=8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
@@ -31,7 +31,7 @@ TIMEOUT=600     # seconds, per tool command
 
 mode=${1:-}
 case $mode in
-  gate) checks=(knip deadcode) ;;
+  gate) checks=(knip deadcode ruff) ;;
   measures) checks=(jscpd vulture) ;;
   *) echo "usage: checks.sh gate|measures" >&2; exit 2 ;;
 esac
@@ -106,6 +106,17 @@ node_tools() {
     timeout "$TIMEOUT" npm ci --ignore-scripts --no-audit --no-fund --prefix "$dir" > /dev/null && touch "$dir/installed"
 }
 node_bin() { echo "$tools/node-$(sha256sum < "$here/tools/package-lock.json" | cut -c1-12)/node_modules/.bin/$1"; }
+
+# python_tools: install ruff and vulture exactly as tools/requirements.txt pins them
+python_tools() {
+  local venv
+  venv=$(dirname "$(dirname "$(python_bin ruff)")")
+  [ -f "$venv/installed" ] && return
+  python3 -m venv "$venv" &&
+    "$venv/bin/pip" install -q --require-hashes --only-binary=:all: -r "$here/tools/requirements.txt" > /dev/null &&
+    touch "$venv/installed"
+}
+python_bin() { echo "$tools/python-$(sha256sum < "$here/tools/requirements.txt" | cut -c1-12)/bin/$1"; }
 
 # filter <check> <dir> <fail level> <reviewdog input flags...> < tool output
 # Keeps the findings on lines the diff adds. Runs in <dir>, where the tool ran,
@@ -195,8 +206,15 @@ check_deadcode() {
   dir=$(cfg '.go.root // "."')
   goos=$(cfg '.go.goos // "linux"')
   # Download first (this also fetches any toolchain go.mod asks for): a network failure is "not run".
-  env -C "$dir" timeout "$TIMEOUT" go mod download 2> "$out/deadcode.err" ||
-    { rc=$?; say deadcode "not run: cannot download the Go modules or toolchain: $(why "$rc" "$out/deadcode.err")"; return; }
+  env -C "$dir" timeout "$TIMEOUT" go mod download 2> "$out/deadcode.err" || {
+    rc=$?
+    if grep -q 'errors parsing go.mod' "$out/deadcode.err"; then
+      say deadcode "failed: go.mod does not parse: $(grep -m1 -A1 'errors parsing go.mod' "$out/deadcode.err" | tail -n1)"
+    else
+      say deadcode "not run: cannot download the Go modules or toolchain: $(why "$rc" "$out/deadcode.err")"
+    fi
+    return
+  }
   # deadcode type-checks with the Go it was built with, so build it with the Go this module selects
   # (+auto lets it go newer if x/tools itself needs that).
   gover=$(env -C "$dir" go env GOVERSION 2> "$out/deadcode.err") ||
@@ -235,24 +253,45 @@ check_jscpd() {
   filter jscpd . none -f=sarif < "$out/jscpd.sarif"
 }
 
+check_ruff() {
+  local rc root roots=()
+  enabled python || { say ruff "not configured"; return; }
+  mapfile -t roots < <(cfg '.python.roots // ["."] | .[]')
+  for root in "${roots[@]}"; do # ruff only warns about a missing path, and would pass having checked nothing
+    [ -e "$root" ] || { say ruff "failed: python.roots in .github/quality.yml names $root, which does not exist"; return; }
+  done
+  python_tools 2> "$out/ruff.err" || { rc=$?; say ruff "not run: cannot install ruff: $(why "$rc" "$out/ruff.err")"; return; }
+  # --select F replaces the repository's rule selection; its per-file-ignores, excludes and noqa comments still apply.
+  timeout "$TIMEOUT" "$(python_bin ruff)" check --no-cache --select F --output-format sarif "${roots[@]}" \
+    > "$out/ruff.sarif" 2> "$out/ruff.err"
+  rc=$? # 1 means it found something; 2 means the repository's configuration or roots are broken
+  [ "$rc" != 2 ] || { say ruff "failed: ruff reports a configuration error: $(why "$rc" "$out/ruff.err")"; return; }
+  [ "$rc" -le 1 ] || { say ruff "not run: ruff $(why "$rc" "$out/ruff.err")"; return; }
+  filter ruff . error -f=sarif < "$out/ruff.sarif"
+}
+
 check_vulture() {
-  local rc key value roots=() args=() venv
+  local rc key value roots=() args=() unread
   enabled python || { say vulture "not configured"; return; }
   mapfile -t roots < <(cfg '.python.roots // ["."] | .[]')
   for key in ignore_names ignore_decorators exclude; do
     value=$(cfg ".python.$key // [] | join(\",\")")
     [ -z "$value" ] || args+=("--${key//_/-}" "$value")
   done
-  venv=$tools/python-$(sha256sum < "$here/tools/requirements.txt" | cut -c1-12)
-  [ -x "$venv/bin/vulture" ] || {
-    python3 -m venv "$venv" &&
-      "$venv/bin/pip" install -q --require-hashes --only-binary=:all: -r "$here/tools/requirements.txt"
-  } > /dev/null 2> "$out/vulture.err" ||
+  python_tools 2> "$out/vulture.err" ||
     { rc=$?; say vulture "not run: cannot install vulture: $(why "$rc" "$out/vulture.err")"; return; }
-  timeout "$TIMEOUT" "$venv/bin/vulture" --min-confidence 60 "${args[@]}" "${roots[@]}" > "$out/vulture.txt" 2> "$out/vulture.err"
-  rc=$? # 3 means it found unused code
-  [ "$rc" = 0 ] || [ "$rc" = 3 ] || { say vulture "not run: vulture $(why "$rc" "$out/vulture.err")"; return; }
+  timeout "$TIMEOUT" "$(python_bin vulture)" --min-confidence 60 "${args[@]}" "${roots[@]}" > "$out/vulture.txt" 2> "$out/vulture.err"
+  rc=$? # 3 means it found unused code; 1 also when it could not read a file
+  # Files vulture could not read: a syntax error or a bad encoding.
+  sed -nE "s/^(.+):[0-9]+: invalid syntax at .*/\1/p; s#^Error: Could not read file ($PWD/)?(.+) - \$#\2#p" \
+    "$out/vulture.err" | sed 's#^\./##' | sort -u > "$out/vulture.unread"
+  [ "$rc" = 0 ] || [ "$rc" = 3 ] || { [ "$rc" = 1 ] && [ -s "$out/vulture.unread" ]; } ||
+    { say vulture "not run: vulture $(why "$rc" "$out/vulture.err")"; return; }
   filter vulture . none -efm='%f:%l: %m' < "$out/vulture.txt"
+  # The measure is partial when a file it could not read is one this pull request changes.
+  unread=$(git diff --text --name-only "$mb" HEAD | grep -Fxf "$out/vulture.unread" | paste -sd, - | sed 's/,/, /g')
+  [ -z "$unread" ] || grep -q '^not run' "$out/vulture.status" ||
+    say vulture "partial, could not read $unread: $(cat "$out/vulture.status")"
 }
 
 for check in "${checks[@]}"; do rm -f "$out/$check.status" "$out/$check.findings"; done
@@ -275,7 +314,7 @@ case $? in
     ;;
 esac
 
-if [ "$mode" = gate ] && grep -qs '^failed' "$out/knip.status" "$out/deadcode.status"; then
+if [ "$mode" = gate ] && grep -qs '^failed' "$out/knip.status" "$out/deadcode.status" "$out/ruff.status"; then
   echo "::error::The dead-code gate failed; see the findings above and the Quality report."
   exit 1
 fi

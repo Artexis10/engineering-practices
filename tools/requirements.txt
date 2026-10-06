@@ -1,2 +1,3 @@
-# The Python tool the quality action runs, pinned by digest (pip install --require-hashes).
+# The Python tools the quality action runs, pinned by digest (pip install --require-hashes).
+ruff==0.16.10 --hash=sha256:f33f43a864a8483eebd160e713336c8bab02c934feaff0a33cf5ccb41546d09a
 vulture==2.16 --hash=sha256:6e0f1c312cef1c87856957e5c2ca9608834a7c794c2180477f30bf0e4cc58eee

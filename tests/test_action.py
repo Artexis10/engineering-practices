@@ -31,6 +31,11 @@ JS = {
     "web/src/index.ts": 'import { used } from "./util";\nconsole.log(used());\n',
     "web/src/util.ts": UTIL,
 }
+# A Python package with an unused import already on main.
+PY = {
+    ".github/quality.yml": "python:\n  roots: [src]\n",
+    "src/app.py": "import os\nimport sys\n\nprint(sys.argv)\n",
+}
 # A Go module whose CI targets windows.
 GO = {
     ".github/quality.yml": "go:\n  goos: windows\n",
@@ -192,6 +197,29 @@ class Gate(unittest.TestCase):
         status, _ = result(out, "deadcode")
         self.assertEqual(code, 1, status)
         self.assertRegex(status, r"^failed: deadcode cannot load the packages \(GOOS=windows\): exit \d+: \S")
+
+    def test_go_mod_that_does_not_parse_fails(self):
+        code, out = gate(GO, {"go.mod": GO["go.mod"] + "\nbogus directive\n"})
+        status, _ = result(out, "deadcode")
+        self.assertEqual(code, 1, status)
+        self.assertRegex(status, r"^failed: go.mod does not parse: go.mod:\d+: unknown directive: bogus")
+
+    def test_added_unused_python_import_fails(self):
+        code, out = gate(PY, {"src/app.py": "import json\n" + PY["src/app.py"]})
+        status, findings = result(out, "ruff")
+        self.assertEqual(code, 1, status)
+        self.assertIn("src/app.py:1: `json` imported but unused", findings)
+
+    def test_added_undefined_python_name_fails(self):
+        code, out = gate(PY, {"src/app.py": PY["src/app.py"].replace("sys.argv", "sys.argv, missing")})
+        status, findings = result(out, "ruff")
+        self.assertEqual(code, 1, status)
+        self.assertIn("src/app.py:4: Undefined name `missing`", findings)
+
+    def test_edit_beside_old_unused_python_import_passes(self):
+        code, out = gate(PY, {"src/app.py": PY["src/app.py"].replace("import sys", "import sys  # arguments")})
+        self.assertIn("`os` imported but unused", (out / "ruff.sarif").read_text())  # ruff still reports it
+        self.assertEqual((code, result(out, "ruff")[0]), (0, "passed"))
 
     def test_go_module_download_failure_is_neutral(self):
         # A required module whose host cannot resolve, fetched directly rather than through the proxy.

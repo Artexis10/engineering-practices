@@ -8,19 +8,23 @@ machine can check.
 - `action.yml` is a composite action every repository runs on its pull requests. It does two things:
   1. **Fails the pull request if it adds dead code** (practice C1): unused files, exports and dependencies
      in TypeScript/JavaScript ([knip](https://knip.dev)), unreachable functions in Go
-     ([deadcode](https://pkg.go.dev/golang.org/x/tools/cmd/deadcode)). Only lines the pull request adds
+     ([deadcode](https://pkg.go.dev/golang.org/x/tools/cmd/deadcode)), and in Python the
+     [ruff](https://docs.astral.sh/ruff/) F rules: unused imports and variables, undefined names,
+     redefinitions. Only lines the pull request adds
      count ([reviewdog](https://github.com/reviewdog/reviewdog) filters the rest), so existing dead code
      fails a pull request only when it edits the line that declares it (see "What counts as added"
      below). It also fails when input the repository owns is broken:
      `.github/quality.yml` does not parse, `npm ci` rejects the lockfile (missing, out of step with
-     `package.json`, or unparseable), knip reports a configuration error, or deadcode cannot load the
-     repository's Go code. A tool or dependency that cannot be downloaded or installed, or a tool that
+     `package.json`, or unparseable), knip or ruff reports a configuration error, `go.mod` does not
+     parse, deadcode cannot load the repository's Go code, or `python.roots` names a missing
+     directory. A tool or dependency that cannot be downloaded or installed, or a tool that
      times out, shows "not run" with its reason, raises a warning, and passes.
   2. **Posts a Quality report** for the reviewer, as one pull request comment updated in place and as the
      job summary: proof weight per path class, new duplicate code as exact token clones
      ([jscpd](https://github.com/kucherenko/jscpd)), Python definitions nothing references
      ([vulture](https://github.com/jendrikseipp/vulture), confidence 60 and up), and test-job runtime
-     against main. These fail nothing. A measure that could not be computed says "not run" and why.
+     against main. These fail nothing. A measure that could not be computed says "not run" and why, and
+     one that could not read a file the pull request changes says "partial" and names the file.
 
 ## Adopt it
 
@@ -52,7 +56,7 @@ so the runtime measure has main runs to compare with.
 The action runs on Linux x86_64 and needs `git`, `curl`, `jq` and `python3`, plus `node` when JavaScript
 is configured and `go` when Go is. GitHub's `ubuntu-latest` has all of them. Every tool is pinned:
 reviewdog, yq and deadcode in `scripts/checks.sh`, knip and jscpd with their whole dependency tree and
-its digests in `tools/package-lock.json`, vulture by digest in `tools/requirements.txt`.
+its digests in `tools/package-lock.json`, ruff and vulture by digest in `tools/requirements.txt`.
 
 Pull requests from forks get a read-only token whatever the job declares, so their report appears in
 the job summary only, and the summary gives GitHub's answer. Dependabot pull requests run with the
@@ -73,8 +77,13 @@ parent, so commits that land on the base branch after the pull request opened ar
 lines. On any other checkout it is the merge base with the event's base commit. An unused file
 counts only when the pull request adds the file, and an unused dependency only when the merge base did
 not declare it, so editing an old unused file or bumping an old unused dependency passes. Editing the
-declaration line of an export that was already unused still fails, because that line counts as added:
-delete the export, or leave that line alone.
+declaration line of an export, function or import that was already unused still fails, because that line
+counts as added: delete it, or leave that line alone.
+
+**ruff and the repository's own config.** The gate runs `ruff check --select F`, which replaces the rule
+selection in the repository's ruff config. Its `per-file-ignores` (for example `__init__.py = ["F401"]`
+for re-exports), its excludes and `# noqa` comments still apply. A Python file that does not parse is
+reported on its added lines too.
 
 ## `.github/quality.yml`
 
@@ -107,7 +116,7 @@ go:                    # turns on the deadcode gate
   ignore:              # extended regular expressions; a finding line ("file:line:col: unreachable func: Name") that matches is dropped
     - "unreachable func: OnSystemEvent$"
 
-python:                # turns on the vulture measure
+python:                # turns on the ruff gate and the vulture measure
   roots: ["src"]       # default ["."]
   ignore_names: ["test_*"]
   ignore_decorators: ["@app.route"]
