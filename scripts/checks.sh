@@ -228,6 +228,9 @@ check_deadcode() {
   local dir absdir top goos rc gover bin gooses=()
   local each='{{$.Dir}}/{{.}}{{"\n"}}'
   enabled go || { say deadcode "not configured"; return; }
+  # No check needs VCS stamping, and Go's VCS lookup fails in a linked worktree (its .git is a file)
+  # under a directory whose .git git rejects, such as an agent sandbox's stub.
+  local -x GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false"
   dir=$(cfg '.go.root // "."')
   mapfile -t gooses < <(cfg '.go.goos // "linux" | if type == "array" then .[] else . end')
   # Download first (this also fetches any toolchain go.mod asks for): a network failure is "not run".
