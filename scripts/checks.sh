@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2329 # the check_* functions are called as "check_$check"
-# Run the dead-code gate or the review measures on the repository in the
-# current directory, over the diff between the pull request's base and HEAD.
+# Run the gate or the review measures on the repository in the current
+# directory, over the diff between the pull request's base and HEAD.
 #
-#   checks.sh gate       knip (TS/JS), deadcode (Go) and ruff's F rules (Python);
-#                        exits 1 when one reports a finding on a line the diff
-#                        adds, or reports that the repository's own input is broken
+#   checks.sh gate       dead code: knip (TS/JS), deadcode (Go) and ruff's F rules
+#                        (Python); and the linters the repository turns on: ESLint,
+#                        staticcheck and ShellCheck. Exits 1 when one reports a
+#                        finding on a line the diff adds, or reports that the
+#                        repository's own input is broken
 #   checks.sh measures   jscpd and vulture; never fails
 #
 # Each check writes $EP_OUT/<check>.status ("passed", "failed: ...",
@@ -14,26 +16,33 @@
 # A download, install or timeout failure is "not run", never a failure: the
 # tools and dependencies come from the network, and an outage must not freeze
 # every merge. Input the repository owns (quality.yml, its lockfile, its code
-# and its knip configuration) fails the gate when it is broken.
+# and its knip, ESLint or staticcheck configuration) fails the gate when it is broken.
 #
 # Environment: EP_BASE and EP_HEAD (the pull request's base and head commits), EP_BASE_REF (its base
 # branch), EP_OUT and EP_TOOLS
 # (default under $RUNNER_TEMP). Needs bash, git, curl, jq and python3; node for
-# knip and jscpd; go for deadcode. Linux x86_64 only.
+# knip, jscpd and ESLint; go for deadcode and staticcheck. Linux x86_64 only.
 set -uo pipefail
 
 # Pinned tools. knip and jscpd are pinned with their whole dependency tree by
-# tools/package-lock.json, ruff and vulture by tools/requirements.txt. Moving a version is
-# a change to these files, gated by the fixture tests.
+# tools/package-lock.json, ruff and vulture by tools/requirements.txt, and ESLint by the
+# repository's own lockfile. Moving a version is a change to these files, gated by the fixture tests.
 REVIEWDOG=0.21.2 REVIEWDOG_SHA256=30413aa3c7443e9c3c157fe5766cad40e3bb39a32e210ee69b710a8d5c4b8e51
 YQ=4.54.1 YQ_SHA256=8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
-DEADCODE=0.51.0 # golang.org/x/tools; go install checks it against the Go checksum database
+SHELLCHECK=0.11.0 SHELLCHECK_SHA256=b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
+# go install checks these against the Go checksum database.
+DEADCODE=0.51.0   # golang.org/x/tools
+STATICCHECK=0.8.1 # honnef.co/go/tools
 TIMEOUT=600     # seconds, per tool command
 BUDGET=${EP_BUDGET:-600} # seconds for the whole action, so it ends inside a caller's timeout-minutes: 15
+# No check needs VCS stamping, and Go's VCS lookup fails in a linked worktree (its .git is a file)
+# under a directory whose .git git rejects, such as an agent sandbox's stub.
+export GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false"
 
 mode=${1:-}
 case $mode in
-  gate) checks=(knip deadcode ruff) ;;
+  # Cheapest first, so a slow npm install or Go build cannot leave the quick checks without budget.
+  gate) checks=(ruff shellcheck knip eslint deadcode staticcheck) ;;
   measures) checks=(jscpd vulture) ;;
   *) echo "usage: checks.sh gate|measures" >&2; exit 2 ;;
 esac
@@ -139,6 +148,94 @@ python_tools() {
 }
 python_bin() { echo "$tools/python-$(sha256sum < "$here/tools/requirements.txt" | cut -c1-12)/bin/$1"; }
 
+# npm_ci <check> <dir>: install the repository's dependencies in <dir> as its lockfile pins them,
+# without install scripts, once per run. On failure records <check>'s status and returns 1.
+declare -A npm_installed=()
+npm_ci() {
+  local rc abs
+  abs=$(cd "$2" && pwd -P)
+  [ -z "${npm_installed[$abs]:-}" ] || return 0
+  bounded env -C "$2" npm ci --ignore-scripts --no-audit --no-fund > /dev/null 2> "$out/$1.err" || {
+    rc=$?
+    # A lockfile out of step with package.json, or one that does not parse, is the repository's own input.
+    if grep -qE '^npm (ERR!|error) code (EUSAGE|EJSONPARSE)$' "$out/$1.err"; then
+      say "$1" "failed: npm ci rejects the repository's package files: $(why "$rc" "$out/$1.err")"
+    else
+      say "$1" "not run: npm ci $(why "$rc" "$out/$1.err")"
+    fi
+    return 1
+  }
+  npm_installed[$abs]=1
+}
+
+# go_prepare <check> <package> <version>: download the module's dependencies (and any toolchain
+# go.mod asks for), then install the tool. It type-checks with the Go it was built with, so it is built
+# with the Go the module selects (+auto lets it go newer if the tool itself needs that). Sets the
+# caller's dir, gooses and bin; on failure records <check>'s status and returns 1.
+go_prepare() {
+  local check=$1 rc gover
+  dir=$(cfg '.go.root // "."')
+  mapfile -t gooses < <(cfg '.go.goos // "linux" | if type == "array" then .[] else . end')
+  # A network failure is "not run".
+  bounded env -u PWD -C "$dir" go mod download 2> "$out/$check.err" || {
+    rc=$?
+    if grep -q 'errors parsing go.mod' "$out/$check.err"; then
+      say "$check" "failed: go.mod does not parse: $(grep -m1 -A1 'errors parsing go.mod' "$out/$check.err" | tail -n1)"
+    else
+      say "$check" "not run: cannot download the Go modules or toolchain: $(why "$rc" "$out/$check.err")"
+    fi
+    return 1
+  }
+  gover=$(env -u PWD -C "$dir" go env GOVERSION 2> "$out/$check.err") ||
+    { rc=$?; say "$check" "not run: cannot tell which Go the module selects: $(why "$rc" "$out/$check.err")"; return 1; }
+  bin=$tools/$check-$3-$gover/$check
+  [ -x "$bin" ] || bounded env GOBIN="$(dirname "$bin")" GOTOOLCHAIN="$gover+auto" \
+    go install "$2@v$3" 2> "$out/$check.err" ||
+    { rc=$?; say "$check" "not run: cannot install $check with $gover: $(why "$rc" "$out/$check.err")"; return 1; }
+}
+
+# go_kept <check> [go list flags...]: from $out/<check>.<GOOS>.txt, one "file:line:col: message" per
+# finding with the file absolute or relative to dir, keep a finding only if every GOOS that builds its
+# file reports it: a helper in a shared file called only from one platform's files is live in that
+# platform's build. Writes the kept findings, relative to the repository root and minus go.ignore, to
+# $out/<check>.kept; on failure records <check>'s status and returns 1.
+go_kept() {
+  local check=$1 goos rc absdir top
+  local each='{{$.Dir}}/{{.}}{{"\n"}}'
+  shift
+  # Findings and built files are matched on absolute paths, and go list prints absolute directories.
+  # Every Go command runs without PWD, so Go resolves its directory physically, as pwd -P and git do,
+  # even in a symlinked workspace.
+  absdir=$(cd "$dir" && pwd -P)
+  top=$(git rev-parse --show-toplevel)
+  : > "$out/$check.runs"
+  for goos in "${gooses[@]}"; do
+    # The files this GOOS builds, its packages' dependencies included ("built<TAB>GOOS<TAB>path"),
+    # then its findings ("hit<TAB>finding").
+    env -u PWD -C "$dir" GOOS="$goos" GOPROXY=off go list -deps -test "$@" -f \
+      "{{range .GoFiles}}$each{{end}}{{range .CgoFiles}}$each{{end}}{{range .TestGoFiles}}$each{{end}}{{range .XTestGoFiles}}$each{{end}}" \
+      ./... 2> "$out/$check.err" | awk -v goos="$goos" '{ print "built\t" goos "\t" $0 }' >> "$out/$check.runs" ||
+      { rc=$?; say "$check" "failed: go list cannot load the packages (GOOS=$goos): $(why "$rc" "$out/$check.err")"; return 1; }
+    awk -v dir="$absdir/" '{ print "hit\t" (index($0, "/") == 1 ? "" : dir) $0 }' "$out/$check.$goos.txt" >> "$out/$check.runs"
+  done
+  awk -F '\t' '
+    $1 == "built" { built[$2, $3] = 1; gooses[$2] = 1; next }
+    { finding = substr($0, 5); if (!(finding in hits)) order[++m] = finding; hits[finding]++ }
+    END {
+      for (j = 1; j <= m; j++) {
+        split(order[j], part, ":"); need = 0
+        for (g in gooses) need += ((g, part[1]) in built)
+        if (hits[order[j]] == need) print order[j]
+      }
+    }' "$out/$check.runs" | awk -v top="$top/" 'index($0, top) == 1 { $0 = substr($0, length(top) + 1) } { print }' \
+    > "$out/$check.txt"
+  cfg '.go.ignore // [] | .[]' > "$out/$check.ignore"
+  grep -Ev -f "$out/$check.ignore" "$out/$check.txt" > "$out/$check.kept" 2> "$out/$check.err"
+  rc=$?
+  [ "$rc" -le 1 ] ||
+    { say "$check" "failed: go.ignore in .github/quality.yml is not a valid regex list ($(why "$rc" "$out/$check.err"))"; return 1; }
+}
+
 # filter <check> <dir> <fail level> <reviewdog input flags...> < tool output
 # Keeps the findings on lines the diff adds. Runs in <dir>, where the tool ran,
 # so that reviewdog maps the tool's relative paths onto the diff. --text keeps a
@@ -181,18 +278,7 @@ check_knip() {
   local dir rc config=()
   enabled javascript || { say knip "not configured"; return; }
   dir=$(cfg '.javascript.root // "."')
-  if [ -f "$dir/package.json" ]; then
-    bounded env -C "$dir" npm ci --ignore-scripts --no-audit --no-fund > /dev/null 2> "$out/knip.err" || {
-      rc=$?
-      # A lockfile out of step with package.json, or one that does not parse, is the repository's own input.
-      if grep -qE '^npm (ERR!|error) code (EUSAGE|EJSONPARSE)$' "$out/knip.err"; then
-        say knip "failed: npm ci rejects the repository's package files: $(why "$rc" "$out/knip.err")"
-      else
-        say knip "not run: npm ci $(why "$rc" "$out/knip.err")"
-      fi
-      return
-    }
-  fi
+  if [ -f "$dir/package.json" ]; then npm_ci knip "$dir" || return; fi
   node_tools 2> "$out/knip.err" || { rc=$?; say knip "not run: cannot install knip: $(why "$rc" "$out/knip.err")"; return; }
   if [ "$(cfg '.javascript.knip | type')" = object ]; then
     jq .javascript.knip "$out/config.json" > "$out/knip.json"
@@ -225,71 +311,114 @@ check_knip() {
 }
 
 check_deadcode() {
-  local dir absdir top goos rc gover bin gooses=()
-  local each='{{$.Dir}}/{{.}}{{"\n"}}'
+  local dir bin goos rc gooses=()
   enabled go || { say deadcode "not configured"; return; }
-  # No check needs VCS stamping, and Go's VCS lookup fails in a linked worktree (its .git is a file)
-  # under a directory whose .git git rejects, such as an agent sandbox's stub.
-  local -x GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false"
-  dir=$(cfg '.go.root // "."')
-  mapfile -t gooses < <(cfg '.go.goos // "linux" | if type == "array" then .[] else . end')
-  # Download first (this also fetches any toolchain go.mod asks for): a network failure is "not run".
-  bounded env -u PWD -C "$dir" go mod download 2> "$out/deadcode.err" || {
-    rc=$?
-    if grep -q 'errors parsing go.mod' "$out/deadcode.err"; then
-      say deadcode "failed: go.mod does not parse: $(grep -m1 -A1 'errors parsing go.mod' "$out/deadcode.err" | tail -n1)"
-    else
-      say deadcode "not run: cannot download the Go modules or toolchain: $(why "$rc" "$out/deadcode.err")"
-    fi
-    return
-  }
-  # deadcode type-checks with the Go it was built with, so build it with the Go this module selects
-  # (+auto lets it go newer if x/tools itself needs that).
-  gover=$(env -u PWD -C "$dir" go env GOVERSION 2> "$out/deadcode.err") ||
-    { rc=$?; say deadcode "not run: cannot tell which Go the module selects: $(why "$rc" "$out/deadcode.err")"; return; }
-  bin=$tools/deadcode-$DEADCODE-$gover/deadcode
-  [ -x "$bin" ] || bounded env GOBIN="$(dirname "$bin")" GOTOOLCHAIN="$gover+auto" \
-    go install "golang.org/x/tools/cmd/deadcode@v$DEADCODE" 2> "$out/deadcode.err" ||
-    { rc=$?; say deadcode "not run: cannot install deadcode with $gover: $(why "$rc" "$out/deadcode.err")"; return; }
-  # Both tools are matched on absolute paths: deadcode prints a file under its directory relative to
-  # it and any other file absolute, and go list prints absolute directories. Every Go command runs
-  # without PWD, so Go resolves its directory physically, as pwd -P and git do, even in a symlinked
-  # workspace.
-  absdir=$(cd "$dir" && pwd -P)
-  top=$(git rev-parse --show-toplevel)
-  : > "$out/deadcode.runs"
+  go_prepare deadcode golang.org/x/tools/cmd/deadcode "$DEADCODE" || return
   for goos in "${gooses[@]}"; do
-    # With the network off, a load failure is the repository's own code.
+    # With the network off, a load failure is the repository's own code. deadcode prints a file under
+    # its directory relative to it, and any other file absolute.
     bounded env -u PWD -C "$dir" GOOS="$goos" GOPROXY=off "$bin" -test ./... > "$out/deadcode.$goos.txt" 2> "$out/deadcode.err"
     rc=$?
     [ "$rc" != 124 ] || { say deadcode "not run: deadcode (GOOS=$goos) $(why "$rc" "$out/deadcode.err")"; return; }
     [ "$rc" = 0 ] || { say deadcode "failed: deadcode cannot load the packages (GOOS=$goos): $(why "$rc" "$out/deadcode.err")"; return; }
-    # The files this GOOS builds, its packages' dependencies included ("built<TAB>GOOS<TAB>path"),
-    # then its findings ("dead<TAB>finding"). -tags= matches deadcode, which overrides tags in GOFLAGS.
-    env -u PWD -C "$dir" GOOS="$goos" GOPROXY=off go list -deps -test -tags= -f \
-      "{{range .GoFiles}}$each{{end}}{{range .CgoFiles}}$each{{end}}{{range .TestGoFiles}}$each{{end}}{{range .XTestGoFiles}}$each{{end}}" \
-      ./... 2> "$out/deadcode.err" | awk -v goos="$goos" '{ print "built\t" goos "\t" $0 }' >> "$out/deadcode.runs" ||
-      { rc=$?; say deadcode "failed: go list cannot load the packages (GOOS=$goos): $(why "$rc" "$out/deadcode.err")"; return; }
-    awk -v dir="$absdir/" '{ print "dead\t" (index($0, "/") == 1 ? "" : dir) $0 }' "$out/deadcode.$goos.txt" >> "$out/deadcode.runs"
   done
-  # A function is dead only if every GOOS that builds its file reports it: a helper in a shared file
-  # called only from one platform's files is live in that platform's build.
-  awk -F '\t' '
-    $1 == "built" { built[$2, $3] = 1; gooses[$2] = 1; next }
-    { finding = substr($0, 6); if (!(finding in hits)) order[++m] = finding; hits[finding]++ }
-    END {
-      for (j = 1; j <= m; j++) {
-        split(order[j], part, ":"); need = 0
-        for (g in gooses) need += ((g, part[1]) in built)
-        if (hits[order[j]] == need) print order[j]
-      }
-    }' "$out/deadcode.runs" | awk -v top="$top/" 'index($0, top) == 1 { $0 = substr($0, length(top) + 1) } { print }' \
-    > "$out/deadcode.txt"
-  cfg '.go.ignore // [] | .[]' > "$out/deadcode.ignore"
-  grep -Ev -f "$out/deadcode.ignore" "$out/deadcode.txt" > "$out/deadcode.kept" 2> "$out/deadcode.err"
-  rc=$?
-  [ "$rc" -le 1 ] || { say deadcode "failed: go.ignore in .github/quality.yml is not a valid regex list ($(why "$rc" "$out/deadcode.err"))"; return; }
+  # -tags= matches deadcode, which overrides tags in GOFLAGS.
+  go_kept deadcode -tags= || return
   filter deadcode . error -efm='%f:%l:%c: %m' < "$out/deadcode.kept"
+}
+
+check_staticcheck() {
+  local dir bin goos rc broken gooses=()
+  enabled go && [ "$(cfg '.go.staticcheck')" = true ] || { say staticcheck "not configured"; return; }
+  go_prepare staticcheck honnef.co/go/tools/cmd/staticcheck "$STATICCHECK" || return
+  for goos in "${gooses[@]}"; do
+    # Exit 1 means findings, or packages that do not load: with the network off, the repository's own code.
+    bounded env -u PWD -C "$dir" GOOS="$goos" GOPROXY=off "$bin" -f json ./... \
+      > "$out/staticcheck.$goos.json" 2> "$out/staticcheck.err"
+    rc=$?
+    [ "$rc" -le 1 ] || { say staticcheck "not run: staticcheck (GOOS=$goos) $(why "$rc" "$out/staticcheck.err")"; return; }
+    [ "$rc" = 0 ] || [ -s "$out/staticcheck.$goos.json" ] ||
+      { say staticcheck "failed: staticcheck cannot load the packages (GOOS=$goos): $(why "$rc" "$out/staticcheck.err")"; return; }
+    # Code that does not type-check, or a staticcheck.conf it cannot read, is reported as a finding
+    # without a line; it is the repository's own input.
+    broken=$(jq -r 'select(.code == "compile" or .code == "config") | .message | gsub("\\s+"; " ")' \
+      "$out/staticcheck.$goos.json" 2> "$out/staticcheck.err" | head -n1)
+    [ -z "$broken" ] || { say staticcheck "failed: staticcheck cannot check the packages (GOOS=$goos): $broken"; return; }
+    jq -r '"\(.location.file):\(.location.line):\(.location.column): \(.message | gsub("\\s+"; " ")) (\(.code))"' \
+      "$out/staticcheck.$goos.json" > "$out/staticcheck.$goos.txt" 2> "$out/staticcheck.err" ||
+      { rc=$?; say staticcheck "not run: cannot read staticcheck's output: $(why "$rc" "$out/staticcheck.err")"; return; }
+  done
+  # No -tags=: staticcheck, unlike deadcode, builds with the tags in GOFLAGS, as go list does.
+  go_kept staticcheck || return
+  filter staticcheck . error -efm='%f:%l:%c: %m' < "$out/staticcheck.kept"
+}
+
+check_eslint() {
+  local dir rc top args=()
+  enabled eslint || { say eslint "not configured"; return; }
+  dir=$(cfg '.eslint.root // "."')
+  mapfile -t args < <(cfg '.eslint.args // ["."] | .[]')
+  [ -f "$dir/package.json" ] ||
+    { say eslint "failed: eslint.root in .github/quality.yml names $dir, which has no package.json"; return; }
+  # The repository's own ESLint, plugins and config, as its lockfile pins them.
+  npm_ci eslint "$dir" || return
+  [ -x "$dir/node_modules/.bin/eslint" ] || { say eslint "failed: $dir/package.json does not install eslint"; return; }
+  rm -f "$out/eslint.json"
+  bounded env -C "$dir" node_modules/.bin/eslint --format json --output-file "$out/eslint.json" "${args[@]}" \
+    > /dev/null 2> "$out/eslint.err"
+  rc=$? # 1 means it found errors; 2 means the repository's configuration is broken
+  [ "$rc" != 2 ] || { say eslint "failed: eslint reports a configuration error: $(why "$rc" "$out/eslint.err")"; return; }
+  [ "$rc" -le 1 ] || { say eslint "not run: eslint $(why "$rc" "$out/eslint.err")"; return; }
+  # Errors only: a rule the repository sets to "warn" does not fail its own lint either. ESLint gives
+  # absolute paths; a message without a line is dropped by the added-line filter.
+  top=$(git rev-parse --show-toplevel)
+  jq -c --arg top "$top/" '.[] | .filePath as $file | .messages[] | select(.severity == 2) | {
+      message: (.message + if .ruleId then " (\(.ruleId))" else "" end),
+      location: {
+        path: (if ($file | startswith($top)) then $file[($top | length):] else $file end),
+        range: (if .line then {start: {line: .line, column: (.column // 1)}} else null end)
+      },
+      severity: "ERROR"
+    }' "$out/eslint.json" > "$out/eslint.all.rdjsonl" 2> "$out/eslint.err" ||
+    { rc=$?; say eslint "not run: cannot read eslint's output: $(why "$rc" "$out/eslint.err")"; return; }
+  filter eslint . error -f=rdjsonl < "$out/eslint.all.rdjsonl"
+}
+
+check_shellcheck() {
+  local rc file first sc=$tools/shellcheck-$SHELLCHECK files=() args=()
+  local shebang='^#!.*[/[:space:]](sh|bash|dash|ksh)([[:space:]]|$)'
+  enabled shellcheck || { say shellcheck "not configured"; return; }
+  mapfile -t args < <(cfg '.shellcheck.args // [] | .[]')
+  # Only the shell scripts this pull request adds or changes can have added lines: *.sh and *.bash
+  # files, and files whose first line is a shebang for a shell ShellCheck checks.
+  while IFS= read -r -d '' file; do
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    first=$(head -c 200 -- "$file" | tr -d '\0' | head -n1)
+    if [[ $file == *.sh || $file == *.bash || $first =~ $shebang ]]; then files+=("$file"); fi
+  done < <(git diff --text -z --name-only --diff-filter=d "$mb" HEAD)
+  [ "${#files[@]}" -gt 0 ] || { say shellcheck "no shell script changed"; return; }
+  if [ ! -x "$sc" ]; then
+    { fetch "https://github.com/koalaman/shellcheck/releases/download/v$SHELLCHECK/shellcheck-v$SHELLCHECK.linux.x86_64.tar.gz" \
+        "$SHELLCHECK_SHA256" "$tools/shellcheck.tgz" &&
+        tar -xzf "$tools/shellcheck.tgz" -C "$tools" --strip-components=1 "shellcheck-v$SHELLCHECK/shellcheck" &&
+        mv "$tools/shellcheck" "$sc"; } 2> "$out/shellcheck.err" ||
+      { rc=$?; say shellcheck "not run: cannot install shellcheck: $(why "$rc" "$out/shellcheck.err")"; return; }
+  fi
+  # Warnings and errors only by default: notes and style must not fail. A repository can lower it
+  # with a --severity in its args, which comes later and wins.
+  bounded "$sc" --format=json1 --severity=warning "${args[@]}" -- "${files[@]}" > "$out/shellcheck.json" 2> "$out/shellcheck.err"
+  rc=$? # 1 means it found something; 3 and 4 mean shellcheck.args in quality.yml are broken
+  [ "$rc" != 3 ] && [ "$rc" != 4 ] ||
+    { say shellcheck "failed: shellcheck rejects shellcheck.args in .github/quality.yml: $(why "$rc" "$out/shellcheck.err")"; return; }
+  [ "$rc" -le 1 ] || { say shellcheck "not run: shellcheck $(why "$rc" "$out/shellcheck.err")"; return; }
+  # JSON rather than an errorformat, so a file name with a space or a newline stays whole.
+  jq -c '.comments[] | {
+      message: "\(.level): \(.message) [SC\(.code)]",
+      location: {path: .file, range: {start: {line: .line, column: .column}}},
+      severity: "ERROR"
+    }' "$out/shellcheck.json" > "$out/shellcheck.all.rdjsonl" 2> "$out/shellcheck.err" ||
+    { rc=$?; say shellcheck "not run: cannot read shellcheck's output: $(why "$rc" "$out/shellcheck.err")"; return; }
+  filter shellcheck . error -f=rdjsonl < "$out/shellcheck.all.rdjsonl"
 }
 
 check_jscpd() {
@@ -344,7 +473,12 @@ check_vulture() {
     "$out/vulture.err" | sed 's#^\./##' | sort -u > "$out/vulture.unread"
   [ "$rc" = 0 ] || [ "$rc" = 3 ] || { [ "$rc" = 1 ] && [ -s "$out/vulture.unread" ]; } ||
     { say vulture "not run: vulture $(why "$rc" "$out/vulture.err")"; return; }
-  filter vulture . none -efm='%f:%l: %m' < "$out/vulture.txt"
+  # Converted to JSON rather than read with an errorformat, so a path with a space stays whole.
+  jq -cR 'capture("^(?<path>.+?):(?<line>[0-9]+): (?<message>.*)$")
+    | {message, location: {path, range: {start: {line: (.line | tonumber)}}}}' \
+    "$out/vulture.txt" > "$out/vulture.all.rdjsonl" 2> "$out/vulture.err" ||
+    { rc=$?; say vulture "not run: cannot read vulture's output: $(why "$rc" "$out/vulture.err")"; return; }
+  filter vulture . none -f=rdjsonl < "$out/vulture.all.rdjsonl"
   # The measure is partial when a file it could not read is one this pull request changes.
   unread=$(git diff --text --name-only "$mb" HEAD | grep -Fxf "$out/vulture.unread" | paste -sd, - | sed 's/,/, /g')
   [ -z "$unread" ] || grep -q '^not run' "$out/vulture.status" ||
@@ -371,8 +505,12 @@ case $? in
     ;;
 esac
 
-if [ "$mode" = gate ] && grep -qs '^failed' "$out/knip.status" "$out/deadcode.status" "$out/ruff.status"; then
-  echo "::error::The dead-code gate failed; see the findings above and the Quality report."
-  exit 1
+if [ "$mode" = gate ]; then
+  for check in "${checks[@]}"; do
+    if grep -qs '^failed' "$out/$check.status"; then
+      echo "::error::The gate failed; see the findings above and the Quality report."
+      exit 1
+    fi
+  done
 fi
 exit 0

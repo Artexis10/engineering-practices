@@ -6,18 +6,21 @@ machine can check.
 - [PRACTICES.md](PRACTICES.md) is the registry: one row per practice, with its source, its enforcer, what
   it prevents, what it costs when it fires wrongly and who pays.
 - `action.yml` is a composite action every repository runs on its pull requests. It does two things:
-  1. **Fails the pull request if it adds dead code** (practice C1): unused files, exports and dependencies
-     in TypeScript/JavaScript ([knip](https://knip.dev)), unreachable functions in Go
-     ([deadcode](https://pkg.go.dev/golang.org/x/tools/cmd/deadcode)), and in Python the
+  1. **Fails the pull request if it adds dead code or lint findings.** Dead code (practice C1): unused
+     files, exports and dependencies in TypeScript/JavaScript ([knip](https://knip.dev)), unreachable
+     functions in Go ([deadcode](https://pkg.go.dev/golang.org/x/tools/cmd/deadcode)), and in Python the
      [ruff](https://docs.astral.sh/ruff/) F rules: unused imports and variables, undefined names,
-     redefinitions. Only lines the pull request adds
-     count ([reviewdog](https://github.com/reviewdog/reviewdog) filters the rest), so existing dead code
-     fails a pull request only when it edits the line that declares it (see "What counts as added"
-     below). It also fails when input the repository owns is broken:
+     redefinitions. Lint (practice C5), from each linter the repository turns on: its own
+     [ESLint](https://eslint.org) with its config and plugins, [staticcheck](https://staticcheck.dev)
+     for Go, and [ShellCheck](https://www.shellcheck.net) for the shell scripts the pull request
+     changes. Only lines the pull request adds count ([reviewdog](https://github.com/reviewdog/reviewdog)
+     filters the rest), so an existing finding fails a pull request only when it edits that line (see
+     "What counts as added" below). The gate also fails when input the repository owns is broken:
      `.github/quality.yml` does not parse, `npm ci` rejects the lockfile (missing, out of step with
-     `package.json`, or unparseable), knip or ruff reports a configuration error, `go.mod` does not
-     parse, deadcode cannot load the repository's Go code, or `python.roots` names a missing
-     directory. A tool or dependency that cannot be downloaded or installed, or a tool that
+     `package.json`, or unparseable), knip, ruff or ESLint reports a configuration error, the ESLint
+     root does not install ESLint, `go.mod` does not parse, deadcode or staticcheck cannot load the
+     repository's Go code, `python.roots` names a missing directory, or ShellCheck rejects
+     `shellcheck.args`. A tool or dependency that cannot be downloaded or installed, or a tool that
      times out, shows "not run" with its reason, raises a warning, and passes.
   2. **Posts a Quality report** for the reviewer, as one pull request comment updated in place and as the
      job summary: proof weight per path class, new duplicate code as exact token clones
@@ -56,22 +59,25 @@ Then commit `.github/quality.yml` (below). The workflow should also run on pushe
 so the runtime measure has main runs to compare with.
 
 The action runs on Linux x86_64 and needs `git`, `curl`, `jq` and `python3`, plus `node` when JavaScript
-is configured and `go` when Go is. GitHub's `ubuntu-latest` has all of them. Every tool is pinned:
-reviewdog, yq and deadcode in `scripts/checks.sh`, knip and jscpd with their whole dependency tree and
-its digests in `tools/package-lock.json`, ruff and vulture by digest in `tools/requirements.txt`.
+or ESLint is configured and `go` when Go is. GitHub's `ubuntu-latest` has all of them. Every tool is
+pinned: reviewdog, yq, ShellCheck, deadcode and staticcheck in `scripts/checks.sh`, knip and jscpd with
+their whole dependency tree and its digests in `tools/package-lock.json`, ruff and vulture by digest in
+`tools/requirements.txt`, and ESLint by the repository's own lockfile.
 
 Pull requests from forks get a read-only token whatever the job declares, so their report appears in
 the job summary only, and the summary gives GitHub's answer. Dependabot pull requests run with the
 permissions the job declares.
 
 **The gate runs the pull request's code.** `npm ci --ignore-scripts` skips install scripts only. knip
-then loads the repository's config files (its own, and those its plugins read, such as
-`vite.config.ts`) and whatever they import, as the repository's test jobs would. So check out with
+and ESLint then load the repository's config files (knip's own and those its plugins read, such as
+`vite.config.ts`; ESLint's config and its plugins) and whatever they import, as the repository's test
+jobs would. So check out with
 `persist-credentials: false`, keep tokens out of the job's environment (the action passes its token
 to the report step only), and run it on `pull_request`; the action refuses `pull_request_target`,
 which would hand that code a write token and the repository's secrets. That code can still write
 `$GITHUB_ENV` and `$GITHUB_PATH` and so reach the report step, which holds the job's token; this matters
-for Dependabot runs, which get the permissions the job declares.
+for Dependabot runs, which get the permissions the job declares. The fix, not yet done, is to run the
+report in a separate job that executes no repository code.
 
 **What counts as added.** A finding fails the gate only on a line the pull request adds, measured against
 the base branch as it is now: on the merge ref that `actions/checkout` checks out, that is HEAD's first
@@ -82,7 +88,9 @@ counts only when the pull request adds the file, and an unused dependency only w
 not declare it, so editing an old unused file or bumping an old unused dependency passes. Editing the
 declaration line of an export, function or import that was already unused still fails, because that line
 counts as added: delete it, or leave that line alone. A moved line counts as added too, so moving an old
-unused import fails: delete it, or run `ruff check --fix`.
+unused import fails: delete it, or run `ruff check --fix`. ShellCheck runs only on the shell scripts the
+pull request adds or changes: `*.sh` and `*.bash` files, and files whose first line is a `sh`, `bash`,
+`dash` or `ksh` shebang.
 
 **ruff and the repository's own config.** The gate runs `ruff check --select F`, which replaces the rule
 selection in the repository's ruff config, a global `ignore` of F codes included: silence those with
@@ -90,6 +98,18 @@ selection in the repository's ruff config, a global `ignore` of F codes included
 as do excludes. A Python file that does not parse is reported on its added lines too. A ruff config the
 pinned ruff cannot load fails the gate on purpose, so keep it compatible with the version in
 `tools/requirements.txt`.
+
+**Linters and their own config.** ESLint runs as `eslint --format json <args>` in `eslint.root`, with
+the repository's config. Only errors count, so a rule set to `warn` does not fail. ESLint only warns
+about a file that no config object matches, so a config that matches no file passes silently: check
+that `eslint.root` and `args` reach the files you expect. staticcheck runs the
+checks the repository's `staticcheck.conf` selects and honours `//lint:ignore`. Its findings go through
+the same per-GOOS rule and `go.ignore` as deadcode. staticcheck builds with the build tags in `GOFLAGS`,
+while deadcode ignores them. ShellCheck reads `.shellcheckrc` and `# shellcheck disable=` comments.
+The action runs it with `--severity=warning`, so only warnings and errors count; notes and style
+findings, such as SC2086 quoting, do not. A `--severity` in `shellcheck.args` comes later and wins.
+A Go file whose path contains a space or a colon does not match the diff, so deadcode and staticcheck
+findings in it are dropped.
 
 **Time.** The action has one time budget, `EP_BUDGET` seconds (default 600), from the start of its first
 step. Each download and each tool runs for at most 600 seconds or what is left of the budget, and a step
@@ -100,7 +120,7 @@ setup and steps before the action (for example setup-go).
 
 ## `.github/quality.yml`
 
-Every key is optional. A language key that is absent turns its check off, and the report shows it as
+Every key is optional. A language or linter key that is absent turns its check off, and the report shows it as
 "not configured".
 
 **Path classes default to product.** A path belongs in a proof class (tests, fixtures, eval, scripts,
@@ -137,10 +157,12 @@ javascript:            # turns on the knip gate
 
 go:                    # turns on the deadcode gate
   root: .              # module directory (default ".")
-  goos: [linux, windows]  # a GOOS or a list of them for deadcode (default linux); with several, a function
-                          # is dead only if every GOOS that builds its file finds it unreachable
-  ignore:              # extended regular expressions; a finding line ("file:line:col: unreachable func: Name",
-                       # file relative to the repository root) that matches is dropped
+  goos: [linux, windows]  # a GOOS or a list of them (default linux); with several, a deadcode or staticcheck
+                          # finding counts only if every GOOS that builds its file reports it
+  staticcheck: true    # also runs staticcheck (default false)
+  ignore:              # extended regular expressions; a finding line that matches is dropped. The line is
+                       # "file:line:col: message", file relative to the repository root; deadcode's message is
+                       # "unreachable func: Name", and staticcheck's ends in its check, such as "(SA4006)"
     - "unreachable func: OnSystemEvent$"
 
 python:                # turns on the ruff gate and the vulture measure
@@ -149,6 +171,14 @@ python:                # turns on the ruff gate and the vulture measure
   ignore_decorators: ["@app.route"]
   exclude: ["*/migrations/*"]
 
+eslint:                # turns on the ESLint gate: the repository's own ESLint, config and plugins
+  root: frontend       # directory with package.json and the lockfile that installs eslint (default ".");
+                       # `npm ci --ignore-scripts` runs there, once when javascript.root is the same
+  args: ["src"]        # arguments after `eslint --format json` (default ["."])
+
+shellcheck:            # turns on the ShellCheck gate for the shell scripts a pull request changes
+  args: ["--exclude=SC1091"]   # options for shellcheck after --severity=warning (default none)
+
 duplicates:            # the jscpd measure (exact token clones) always runs
   paths: ["src"]       # default ["."]; .gitignore is respected
   ignore: ["**/fixtures/**"]
@@ -156,7 +186,10 @@ duplicates:            # the jscpd measure (exact token clones) always runs
 test_jobs: ["test"]    # job names in this workflow whose runtime is compared with main
 ```
 
-A false positive in the gate is silenced here and nowhere else, so review sees every ignore entry.
+A false positive from knip or deadcode is silenced here, where review sees every ignore entry. ruff,
+ESLint, staticcheck and ShellCheck findings are silenced the tool's own way (`# noqa`, `eslint-disable`,
+`//lint:ignore`, `# shellcheck disable=`), which review sees in the diff; staticcheck's also through
+`go.ignore`.
 
 **Test runtime** compares each named job in this run with the median of its last five successful runs
 on the default branch, in the same workflow and on the same runner: the same labels for GitHub-hosted

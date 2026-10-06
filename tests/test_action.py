@@ -42,6 +42,16 @@ GO = {
     "go.mod": "module example.com/fixture\n\ngo 1.22\n",
     "main.go": "package main\n\nfunc main() {}\n",
 }
+# A package in a subdirectory whose own ESLint, pinned by its lockfile, errors on unused variables,
+# with one already on main.
+ESLINT_PACKAGE = Path(__file__).parent / "fixtures" / "eslint"
+ESLINT = {
+    ".github/quality.yml": "eslint:\n  root: web\n",
+    "web/package.json": (ESLINT_PACKAGE / "package.json").read_text(),
+    "web/package-lock.json": (ESLINT_PACKAGE / "package-lock.json").read_text(),
+    "web/eslint.config.mjs": 'export default [{ rules: { "no-unused-vars": "error" } }];\n',
+    "web/src/app.js": 'const old = 1;\nconsole.log("app");\n',
+}
 LEFT_PAD = {
     "1.2.0": "sha512-OQadpCyFCT/VLniZQgym8d3/ofIJtuZyw2ibsVeIUOexKgW/osn8+mMFJbwGMPeDC4GnLzD8q115WPCDx4YRWg==",
     "1.3.0": "sha512-XI5MPzVNApjAyhQzphX8BkmKsKUxD4LdyK24iZeQGinBN9yTQT3bFlCBy/aVx2HrNcqQGsdot8ghrjyrvMCoEA==",
@@ -301,6 +311,47 @@ class Gate(unittest.TestCase):
         code, out = gate(PY, {"src/app.py": PY["src/app.py"].replace("import sys", "import sys  # arguments")})
         self.assertIn("`os` imported but unused", (out / "ruff.sarif").read_text())  # ruff still reports it
         self.assertEqual((code, result(out, "ruff")[0]), (0, "passed"))
+
+    def test_added_eslint_error_fails_and_an_old_one_beside_an_edit_passes(self):
+        head = {"web/src/app.js": 'const old = 1;\nconsole.log("app, edited");\nconst added = 2;\n'}
+        code, out = gate(ESLINT, head)
+        status, findings = result(out, "eslint")
+        self.assertIn("'old' is assigned a value but never used", (out / "eslint.json").read_text())  # still reported
+        self.assertEqual(code, 1, status)
+        self.assertEqual(findings, "web/src/app.js:3: 'added' is assigned a value but never used. (no-unused-vars)\n")
+
+    def test_added_staticcheck_finding_fails_and_an_old_one_beside_an_edit_passes(self):
+        config = "go:\n  goos: windows\n  staticcheck: true\n"
+        old = 'package main\n\nfunc main() {\n\tx := 1\n\tif x == x {\n\t\tprintln("old")\n\t}\n}\n'
+        new = (
+            'package main\n\nfunc main() {\n\tx := 1\n\tif x == x {\n\t\tprintln("edited")\n\t}\n'
+            '\ty := 2\n\tif y != y {\n\t\tprintln("new")\n\t}\n}\n'
+        )
+        code, out = gate({**GO, ".github/quality.yml": config, "main.go": old}, {"main.go": new})
+        status, findings = result(out, "staticcheck")
+        self.assertIn("'==' operator", (out / "staticcheck.windows.json").read_text())  # still reported
+        self.assertEqual(code, 1, status)
+        self.assertEqual(
+            findings, "main.go:9: identical expressions on the left and right side of the '!=' operator (SA4000)\n"
+        )
+
+    def test_added_shellcheck_warning_fails_but_an_added_note_or_an_old_warning_passes(self):
+        base = {".github/quality.yml": "shellcheck:\n", "run.sh": "#!/bin/sh\ncd /tmp\necho start\n"}
+        # deploy has no extension; its shebang makes it a shell script. Line 2 is a note (SC2086), line 3 a warning.
+        head = {"run.sh": "#!/bin/sh\ncd /tmp\necho started\n", "deploy": "#!/usr/bin/env bash\necho $1\ncd /srv\n"}
+        code, out = gate(base, head)
+        status, findings = result(out, "shellcheck")
+        self.assertIn('"file":"run.sh","line":2,', (out / "shellcheck.json").read_text())  # still reported
+        self.assertEqual(code, 1, status)
+        self.assertEqual(findings, "deploy:3: warning: Use 'cd ... || exit' or 'cd ... || return' in case cd fails. [SC2164]\n")
+
+    def test_added_shellcheck_warning_in_a_file_name_with_a_space_fails(self):
+        code, out = gate({".github/quality.yml": "shellcheck:\n"}, {"my script.sh": "#!/bin/sh\ncd /tmp\n"})
+        status, findings = result(out, "shellcheck")
+        self.assertEqual(code, 1, status)
+        self.assertEqual(
+            findings, "my script.sh:2: warning: Use 'cd ... || exit' or 'cd ... || return' in case cd fails. [SC2164]\n"
+        )
 
     def test_go_module_download_failure_is_neutral(self):
         # A required module whose host cannot resolve, fetched directly rather than through the proxy.
