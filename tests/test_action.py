@@ -52,6 +52,14 @@ ESLINT = {
     "web/eslint.config.mjs": 'export default [{ rules: { "no-unused-vars": "error" } }];\n',
     "web/src/app.js": 'const old = 1;\nconsole.log("app");\n',
 }
+
+# A Python service checked for banned patterns, and code that decides what a person meant with a word list.
+SEMGREP = {".github/quality.yml": "semgrep:\n  paths: [src]\n", "src/__init__.py": ""}
+WORD_LIST = (
+    'CONFIRM_WORDS = {"yes", "ok", "sure"}\n\n\n'
+    "def confirmed(message_text):\n"
+    "    return all(word in CONFIRM_WORDS for word in message_text.lower().split())\n"
+)
 LEFT_PAD = {
     "1.2.0": "sha512-OQadpCyFCT/VLniZQgym8d3/ofIJtuZyw2ibsVeIUOexKgW/osn8+mMFJbwGMPeDC4GnLzD8q115WPCDx4YRWg==",
     "1.3.0": "sha512-XI5MPzVNApjAyhQzphX8BkmKsKUxD4LdyK24iZeQGinBN9yTQT3bFlCBy/aVx2HrNcqQGsdot8ghrjyrvMCoEA==",
@@ -367,6 +375,29 @@ class Gate(unittest.TestCase):
         self.assertEqual(
             findings, "run.sh:2: warning: Use 'cd ... || exit' or 'cd ... || return' in case cd fails. [SC2164]\n"
         )
+
+    def test_added_word_list_over_a_persons_text_fails(self):
+        code, out = gate(SEMGREP, {"src/bot.py": WORD_LIST})
+        status, findings = result(out, "semgrep")
+        self.assertEqual(code, 1, status)
+        self.assertIn("src/bot.py:5: ep-lexical-intent: a word list or a word regex decides what a person meant", findings)
+
+    def test_edit_beside_old_word_list_passes(self):
+        code, out = gate({**SEMGREP, "src/bot.py": WORD_LIST}, {"src/bot.py": '"""Replies."""\n' + WORD_LIST})
+        self.assertIn("ep-lexical-intent", (out / "semgrep.sarif").read_text())  # semgrep still reports it on the head
+        self.assertEqual((code, result(out, "semgrep")[0]), (0, "passed"))
+
+    def test_format_checks_on_a_persons_text_pass(self):
+        checks = (
+            "import re\n\n"
+            'COUNTRY_CODES = {"GB", "FR", "DE"}\n\n\n'
+            "def is_attachment(text):\n"
+            '    return bool(re.search(r"\\.(pdf|docx|xlsx)$", text.lower()))\n\n\n'
+            "def is_country(text):\n"
+            "    return text.strip().upper() in COUNTRY_CODES\n"
+        )
+        code, out = gate(SEMGREP, {"src/forms.py": checks})
+        self.assertEqual((code, result(out, "semgrep")), (0, ("passed", "")))
 
     def test_go_module_download_failure_is_neutral(self):
         # A required module whose host cannot resolve, fetched directly rather than through the proxy.

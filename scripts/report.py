@@ -27,6 +27,7 @@ GATE = [
     ("eslint", "Lint errors (the repository's ESLint and config)"),
     ("staticcheck", "Go bugs, simplifications and style (staticcheck)"),
     ("shellcheck", "Shell script bugs (ShellCheck)"),
+    ("semgrep", "Banned patterns: word lists over a person's text, regex over SQL or markup (semgrep)"),
 ]
 MEASURES = [
     ("jscpd", "New duplicate code, exact token clones (jscpd)"),
@@ -269,8 +270,9 @@ def render():
             f"### Gate: {verdict()}",
             "",
             (
-                "Dead code and lint findings on lines this pull request adds. Silence a false positive in"
-                " `.github/quality.yml`, or in the linter's own config."
+                "Dead code, lint findings and banned patterns on lines this pull request adds. Silence a false"
+                " positive in `.github/quality.yml`, in the linter's own config, or for a banned pattern with a"
+                " reasoned `# nosemgrep:` line."
             ),
             "",
             *checks(GATE),

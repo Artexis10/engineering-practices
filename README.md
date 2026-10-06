@@ -13,14 +13,18 @@ machine can check.
      redefinitions. Lint (practice C5), from each linter the repository turns on: its own
      [ESLint](https://eslint.org) with its config and plugins, [staticcheck](https://staticcheck.dev)
      for Go, and [ShellCheck](https://www.shellcheck.net) for the shell scripts the pull request
-     changes. Only lines the pull request adds count ([reviewdog](https://github.com/reviewdog/reviewdog)
-     filters the rest), so an existing finding fails a pull request only when it edits that line (see
-     "What counts as added" below). The gate also fails when input the repository owns is broken:
-     `.github/quality.yml` does not parse, `npm ci` rejects the lockfile (missing, out of step with
-     `package.json`, or unparseable), knip, ruff or ESLint reports a configuration error, the ESLint
-     root does not install ESLint, `go.mod` does not parse, deadcode or staticcheck cannot load the
-     repository's Go code, `python.roots` names a missing directory, or ShellCheck rejects
-     `shellcheck.args`. A tool or dependency that cannot be downloaded or installed, or a tool that
+     changes. A banned pattern (practice C6), found by [semgrep](https://semgrep.dev) with
+     `rules/banned-patterns.yml` and the repository's own rules: a word list or word regex that decides
+     what a person meant, a regex over SQL, HTML or XML, and, listed for the reviewer without failing, a
+     domain vocabulary fixed in code. Only lines the pull request adds count
+     ([reviewdog](https://github.com/reviewdog/reviewdog) filters the rest), so an existing finding fails
+     a pull request only when it edits that line (see "What counts as added" below). The gate also fails
+     when input the repository owns is broken: `.github/quality.yml` does not parse, `npm ci` rejects the
+     lockfile (missing, out of step with `package.json`, or unparseable), knip, ruff or ESLint reports a
+     configuration error, the ESLint root does not install ESLint, `go.mod` does not parse, deadcode or
+     staticcheck cannot load the repository's Go code, `python.roots` or a `semgrep` path names a missing
+     file, ShellCheck rejects `shellcheck.args`, or semgrep cannot load the repository's rule files. A
+     tool or dependency that cannot be downloaded or installed, or a tool that
      times out, shows "not run" with its reason, raises a warning, and passes.
   2. **Posts a Quality report** for the reviewer, as one pull request comment updated in place and as the
      job summary: proof weight per path class, new duplicate code as exact token clones
@@ -62,7 +66,8 @@ The action runs on Linux x86_64 and needs `git`, `curl`, `jq` and `python3`, plu
 or ESLint is configured and `go` when Go is. GitHub's `ubuntu-latest` has all of them. Every tool is
 pinned: reviewdog, yq, ShellCheck, deadcode and staticcheck in `scripts/checks.sh`, knip and jscpd with
 their whole dependency tree and its digests in `tools/package-lock.json`, ruff and vulture by digest in
-`tools/requirements.txt`, and ESLint by the repository's own lockfile.
+`tools/requirements.txt`, semgrep with its whole dependency tree by digest in
+`tools/semgrep-requirements.txt`, and ESLint by the repository's own lockfile.
 
 Pull requests from forks get a read-only token whatever the job declares, so their report appears in
 the job summary only, and the summary gives GitHub's answer. Dependabot pull requests run with the
@@ -111,6 +116,16 @@ The action runs it with `--severity=warning`, so only warnings and errors count;
 findings, such as SC2086 quoting, do not. A `--severity` in `shellcheck.args` comes later and wins.
 A Go file whose path contains a space or a colon does not match the diff, so deadcode and staticcheck
 findings in it are dropped.
+
+**Banned patterns.** semgrep reads the files the pull request changes under `semgrep.paths` (each rule
+reads one file at a time, so no other file can change a finding) and reviewdog keeps the findings on
+added lines. A rule of severity ERROR fails the gate; WARNING and INFO findings are listed in the report
+for the reviewer. Each rule's message says what the pattern usually is, the sound shapes, and when to keep
+it: a line that checks a field's format, or reads a closed machine format, may keep a finding with
+`# nosemgrep: <rule-id> -- <reason>`, which review checks. A repository adds its own stricter bans as
+semgrep rule files under `semgrep.rules`, with the same severities. semgrep runs as one job with 120
+seconds per rule and file; a file it gives up on, in whole or in one long function, makes the result
+"partial" and names the file.
 
 **Time.** The action has one time budget, `EP_BUDGET` seconds (default 600), from the start of its first
 step. Each download and each tool runs for at most 600 seconds or what is left of the budget, and a step
@@ -182,6 +197,10 @@ shellcheck:            # turns on the ShellCheck gate for the shell scripts a pu
   exclude: ["**/vendor/*"]     # glob patterns on repository-relative paths to skip, where `*` also matches `/`
                                # and a leading `**/` also matches at the root; args and exclude take a string too
 
+semgrep:               # turns on the banned-patterns gate (Python)
+  paths: ["src"]       # where to look (default ["."]); name product code, not tests or evaluation
+  rules: [".semgrep/local.yml"]  # optional: the repository's own rule files; rules/banned-patterns.yml always runs
+
 duplicates:            # the jscpd measure (exact token clones) always runs
   paths: ["src"]       # default ["."]; .gitignore is respected
   ignore: ["**/fixtures/**"]
@@ -192,7 +211,8 @@ test_jobs: ["test"]    # job names in this workflow whose runtime is compared wi
 A false positive from knip or deadcode is silenced here, where review sees every ignore entry. ruff,
 ESLint, staticcheck and ShellCheck findings are silenced the tool's own way (`# noqa`, `eslint-disable`,
 `//lint:ignore`, `# shellcheck disable=`), which review sees in the diff; staticcheck's also through
-`go.ignore`.
+`go.ignore`. A banned pattern is kept on its own line with `# nosemgrep: <rule-id> -- <reason>`, where
+review sees it.
 
 **Test runtime** compares each named job in this run with the median of its last five successful runs
 on the default branch, in the same workflow and on the same runner: the same labels for GitHub-hosted
