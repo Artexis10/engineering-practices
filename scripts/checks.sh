@@ -177,7 +177,10 @@ check_knip() {
     jq .javascript.knip "$out/config.json" > "$out/knip.json"
     config=(--config "$out/knip.json")
   fi
-  timeout "$TIMEOUT" "$(node_bin knip)" --directory "$dir" "${config[@]}" --include files,exports,dependencies \
+  # knip's Lefthook plugin asks git for the hooks path; the machine's own git config (a global core.hooksPath)
+  # would become entry globs outside the repository, so knip sees only the repository's config, as on a hosted runner.
+  timeout "$TIMEOUT" env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    "$(node_bin knip)" --directory "$dir" "${config[@]}" --include files,exports,dependencies \
     --reporter sarif --no-progress > "$out/knip.sarif" 2> "$out/knip.err"
   rc=$? # 1 means it found unused code; 2 means the repository's configuration is broken
   [ "$rc" != 2 ] || { say knip "failed: knip reports a configuration error: $(why "$rc" "$out/knip.err")"; return; }

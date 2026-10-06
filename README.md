@@ -93,14 +93,15 @@ Every key is optional. A language key that is absent turns its check off, and th
 ```yaml
 # Path classes for proof weight. Patterns are glob patterns on repository-relative paths, where `*`
 # also matches `/` (so `*.test.ts` matches at any depth). A file takes the first class, in the order
-# listed, whose pattern matches; a file matching none is counted as "unclassified". Every class
-# except product and docs counts as proof.
+# listed, whose pattern matches; a file matching none is counted as "unclassified". Class names are
+# free-form; every class except product and docs counts as proof.
 classes:
   fixtures: ["tests/fixtures/*"]
   tests: ["tests/*", "*.test.ts"]
   eval: ["eval/*"]
   scripts: ["scripts/*"]
   specs: ["openspec/*"]
+  tooling: [".github/*", ".pre-commit-config.yaml"]   # CI, lint, hook and agent config
   docs: ["*.md"]
   product: ["src/*"]
 
