@@ -335,15 +335,15 @@ class Gate(unittest.TestCase):
             findings, "main.go:9: identical expressions on the left and right side of the '!=' operator (SA4000)\n"
         )
 
-    def test_added_shellcheck_finding_fails_and_an_old_one_beside_an_edit_passes(self):
-        base = {".github/quality.yml": "shellcheck:\n", "run.sh": "#!/bin/sh\necho $1\necho start\n"}
-        # deploy has no extension; its shebang makes it a shell script.
-        head = {"run.sh": "#!/bin/sh\necho $1\necho started\n", "deploy": "#!/usr/bin/env bash\necho $1\n"}
+    def test_added_shellcheck_warning_fails_but_an_added_note_or_an_old_warning_passes(self):
+        base = {".github/quality.yml": "shellcheck:\n", "run.sh": "#!/bin/sh\ncd /tmp\necho start\n"}
+        # deploy has no extension; its shebang makes it a shell script. Line 2 is a note (SC2086), line 3 a warning.
+        head = {"run.sh": "#!/bin/sh\ncd /tmp\necho started\n", "deploy": "#!/usr/bin/env bash\necho $1\ncd /srv\n"}
         code, out = gate(base, head)
         status, findings = result(out, "shellcheck")
-        self.assertIn("run.sh:2:6:", (out / "shellcheck.txt").read_text())  # still reported
+        self.assertIn("run.sh:2:1:", (out / "shellcheck.txt").read_text())  # still reported
         self.assertEqual(code, 1, status)
-        self.assertEqual(findings, "deploy:2: note: Double quote to prevent globbing and word splitting. [SC2086]\n")
+        self.assertEqual(findings, "deploy:3: warning: Use 'cd ... || exit' or 'cd ... || return' in case cd fails. [SC2164]\n")
 
     def test_go_module_download_failure_is_neutral(self):
         # A required module whose host cannot resolve, fetched directly rather than through the proxy.

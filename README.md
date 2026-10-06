@@ -101,9 +101,10 @@ pinned ruff cannot load fails the gate on purpose, so keep it compatible with th
 **Linters and their own config.** ESLint runs as `eslint --format json <args>` in `eslint.root`, with
 the repository's config. Only errors count, so a rule set to `warn` does not fail. staticcheck runs the
 checks the repository's `staticcheck.conf` selects and honours `//lint:ignore`. Its findings go through
-the same per-GOOS rule and `go.ignore` as deadcode. ShellCheck reads `.shellcheckrc` and
-`# shellcheck disable=` comments, and every severity counts, notes such as SC2086 included. Pass
-`--severity=warning` in `shellcheck.args` to count fewer.
+the same per-GOOS rule and `go.ignore` as deadcode. staticcheck builds with the build tags in `GOFLAGS`,
+while deadcode ignores them. ShellCheck reads `.shellcheckrc` and `# shellcheck disable=` comments.
+The action runs it with `--severity=warning`, so only warnings and errors count; notes and style
+findings, such as SC2086 quoting, do not. A `--severity` in `shellcheck.args` comes later and wins.
 
 **Time.** The action has one time budget, `EP_BUDGET` seconds (default 600), from the start of its first
 step. Each download and each tool runs for at most 600 seconds or what is left of the budget, and a step
@@ -171,7 +172,7 @@ eslint:                # turns on the ESLint gate: the repository's own ESLint, 
   args: ["src"]        # arguments after `eslint --format json` (default ["."])
 
 shellcheck:            # turns on the ShellCheck gate for the shell scripts a pull request changes
-  args: ["--severity=warning"]   # options for shellcheck (default none)
+  args: ["--exclude=SC1091"]   # options for shellcheck after --severity=warning (default none)
 
 duplicates:            # the jscpd measure (exact token clones) always runs
   paths: ["src"]       # default ["."]; .gitignore is respected

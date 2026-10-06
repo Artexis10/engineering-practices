@@ -403,7 +403,9 @@ check_shellcheck() {
         mv "$tools/shellcheck" "$sc"; } 2> "$out/shellcheck.err" ||
       { rc=$?; say shellcheck "not run: cannot install shellcheck: $(why "$rc" "$out/shellcheck.err")"; return; }
   fi
-  bounded "$sc" --format=gcc "${args[@]}" -- "${files[@]}" > "$out/shellcheck.txt" 2> "$out/shellcheck.err"
+  # Warnings and errors only by default: notes and style must not fail. A repository can lower it
+  # with a --severity in its args, which comes later and wins.
+  bounded "$sc" --format=gcc --severity=warning "${args[@]}" -- "${files[@]}" > "$out/shellcheck.txt" 2> "$out/shellcheck.err"
   rc=$? # 1 means it found something; 3 and 4 mean shellcheck.args in quality.yml are broken
   [ "$rc" != 3 ] && [ "$rc" != 4 ] ||
     { say shellcheck "failed: shellcheck rejects shellcheck.args in .github/quality.yml: $(why "$rc" "$out/shellcheck.err")"; return; }
