@@ -84,11 +84,13 @@ def repository(base, head):
     return path, base_commit
 
 
-def merge_ref(base, branch, main_later):
-    """A pull request's merge ref after main moved on: returns (path, event base, pull request head).
+def main_moved_on(base, branch, main_later, merge_ref):
+    """A pull request checked out after main moved on: returns (path, event base, pull request head).
 
-    main holds `base`; the pull request branches off it and adds `branch`; main then gains
-    `main_later`; HEAD merges the pull request into main as it is now, as actions/checkout does.
+    main holds `base`, which the event recorded; the pull request branches off it and adds `branch`;
+    main then gains `main_later`. With `merge_ref`, HEAD merges the pull request into main as it is
+    now, as actions/checkout does. Without, HEAD is the pull request's own head after its branch
+    merged main, and origin/main is fetched.
     """
     path = Path(tempfile.mkdtemp(prefix="ep-fixture-"))
     git(path, "init", "-q", "-b", "main")
@@ -97,7 +99,13 @@ def merge_ref(base, branch, main_later):
     head = commit(path, branch)
     git(path, "checkout", "-q", "main")
     commit(path, main_later)
-    git(path, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+    if merge_ref:
+        git(path, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+    else:
+        git(path, "update-ref", "refs/remotes/origin/main", "main")
+        git(path, "checkout", "-q", "pr")
+        git(path, "merge", "-q", "--no-ff", "-m", "merge main", "main")
+        head = git(path, "rev-parse", "HEAD").strip()
     return path, event_base, head
 
 
@@ -192,6 +200,24 @@ class Gate(unittest.TestCase):
         self.assertEqual(code, 1, status)
         self.assertRegex(status, r"^failed: npm ci rejects the repository's package files: exit \d+: \S")
 
+    def test_listed_goos_report_only_functions_dead_under_all_of_them(self):
+        base = {
+            ".github/quality.yml": "go:\n  goos: [linux, windows]\n",
+            "go.mod": GO["go.mod"],
+            "main.go": "package main\n\nfunc main() { run() }\n",
+            "run_windows.go": "package main\n\nfunc run() {}\n",
+            "run_other.go": "//go:build !windows\n\npackage main\n\nfunc run() {}\n",
+        }
+        head = {  # helper is called only from the non-windows build, so it ships in linux
+            "run_other.go": "//go:build !windows\n\npackage main\n\nfunc run() { helper() }\n",
+            "helper.go": "package main\n\nfunc helper() {}\n\nfunc unused() {}\n",
+        }
+        code, out = gate(base, head)
+        status, findings = result(out, "deadcode")
+        self.assertEqual(code, 1, status)
+        self.assertIn("helper.go:5: unreachable func: unused", findings)
+        self.assertNotIn("unreachable func: helper", findings)
+
     def test_go_code_that_does_not_load_fails(self):
         code, out = gate(GO, {"main.go": 'package main\n\nimport _ "example.com/fixture/missing"\n\nfunc main() {}\n'})
         status, _ = result(out, "deadcode")
@@ -239,19 +265,27 @@ class Gate(unittest.TestCase):
 
 
 class Base(unittest.TestCase):
-    def test_base_branch_commits_after_the_pull_request_opened_are_not_its_lines(self):
+    """main gains an unused export and a file after the pull request opens; only its own line counts."""
+
+    def check_only_the_pull_requests_line_counts(self, merge_ref):
         base = {**JS, ".github/quality.yml": JS[".github/quality.yml"] + "classes:\n  product: ['web/src/*']\n"}
         main_later = {
             "web/src/util.ts": UTIL + "\nexport function mainDead() {\n  return 4;\n}\n",
             "web/src/more.ts": "1\n2\n",
         }
         branch = {"web/src/index.ts": JS["web/src/index.ts"] + 'console.log("pull request");\n'}
-        path, event_base, head = merge_ref(base, branch, main_later)
-        proc, out = run(path, event_base, str(SCRIPTS / "checks.sh"), "gate", EP_HEAD=head)
+        path, event_base, head = main_moved_on(base, branch, main_later, merge_ref)
+        proc, out = run(path, event_base, str(SCRIPTS / "checks.sh"), "gate", EP_HEAD=head, EP_BASE_REF="main")
         report, _ = run(path, event_base, "python3", str(SCRIPTS / "report.py"), EP_OUT=str(out))
         self.assertIn("mainDead", (out / "knip.sarif").read_text())  # knip reports main's new dead code on HEAD
         self.assertEqual((proc.returncode, result(out, "knip")[0]), (0, "passed"))
         self.assertEqual(row(report.stdout, "product"), ["product", "1", "1", "0"])  # only the pull request's line
+
+    def test_on_the_merge_ref(self):
+        self.check_only_the_pull_requests_line_counts(merge_ref=True)
+
+    def test_on_a_head_whose_branch_merged_main(self):
+        self.check_only_the_pull_requests_line_counts(merge_ref=False)
 
 
 class Report(unittest.TestCase):

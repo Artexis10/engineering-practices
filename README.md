@@ -35,6 +35,7 @@ Add one job to the repository's pull-request workflow:
     if: ${{ github.event_name == 'pull_request' && !cancelled() }}
     needs: [test]            # the test jobs named in quality.yml, so their runtime is known; or drop it
     runs-on: ubuntu-latest
+    timeout-minutes: 15      # a hung step must not leave the check pending, which holds merges
     concurrency:
       group: quality-${{ github.workflow }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true
@@ -74,7 +75,8 @@ for Dependabot runs, which get the permissions the job declares.
 **What counts as added.** A finding fails the gate only on a line the pull request adds, measured against
 the base branch as it is now: on the merge ref that `actions/checkout` checks out, that is HEAD's first
 parent, so commits that land on the base branch after the pull request opened are not counted as its
-lines. On any other checkout it is the merge base with the event's base commit. An unused file
+lines. On any other checkout it is the merge base with the base branch as fetched
+(`origin/<base branch>`), or with the event's base commit when that branch was not fetched. An unused file
 counts only when the pull request adds the file, and an unused dependency only when the merge base did
 not declare it, so editing an old unused file or bumping an old unused dependency passes. Editing the
 declaration line of an export, function or import that was already unused still fails, because that line
@@ -118,7 +120,8 @@ javascript:            # turns on the knip gate
 
 go:                    # turns on the deadcode gate
   root: .              # module directory (default ".")
-  goos: windows        # GOOS that deadcode analyses (default linux)
+  goos: [linux, windows]  # a GOOS or a list of them for deadcode (default linux); with several, a function
+                          # is dead only if every GOOS that builds its file finds it unreachable
   ignore:              # extended regular expressions; a finding line ("file:line:col: unreachable func: Name") that matches is dropped
     - "unreachable func: OnSystemEvent$"
 

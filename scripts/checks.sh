@@ -16,7 +16,8 @@
 # every merge. Input the repository owns (quality.yml, its lockfile, its code
 # and its knip configuration) fails the gate when it is broken.
 #
-# Environment: EP_BASE and EP_HEAD (the pull request's base and head commits), EP_OUT and EP_TOOLS
+# Environment: EP_BASE and EP_HEAD (the pull request's base and head commits), EP_BASE_REF (its base
+# branch), EP_OUT and EP_TOOLS
 # (default under $RUNNER_TEMP). Needs bash, git, curl, jq and python3; node for
 # knip and jscpd; go for deadcode. Linux x86_64 only.
 set -uo pipefail
@@ -62,7 +63,7 @@ enabled() { jq -e --arg key "$1" '(. // {}) | has($key)' "$out/config.json" > /d
 
 # fetch <url> <sha256> <dest>: download a pinned file and check its digest
 fetch() {
-  curl -sSfL --retry 2 -o "$3.part" "$1" || return
+  curl -sSfL --retry 2 --connect-timeout 30 --max-time 300 -o "$3.part" "$1" || return
   echo "$2  $3.part" | sha256sum -c --quiet - > /dev/null 2>&1 || { echo "sha256 checksum mismatch for $1" >&2; return 1; }
   mv "$3.part" "$3"
 }
@@ -70,7 +71,7 @@ fetch() {
 # setup: install reviewdog and yq, read the config, find the base commit. On failure
 # prints the reason and returns 1, or 2 when the repository's config is broken.
 setup() {
-  local rc second err=$out/setup.err
+  local rc second base err=$out/setup.err
   [ "$(uname -sm)" = "Linux x86_64" ] || { echo "the runner is $(uname -sm); the action supports Linux x86_64"; return 1; }
   if [ ! -x "$rd" ]; then
     { fetch "https://github.com/reviewdog/reviewdog/releases/download/v$REVIEWDOG/reviewdog_${REVIEWDOG}_Linux_x86_64.tar.gz" \
@@ -88,12 +89,16 @@ setup() {
   # On the pull request's merge ref (what actions/checkout checks out), HEAD merges the head into the base
   # branch as it is now, while the event's base commit can be older; diffing against it would count the
   # base branch's later commits as the pull request's. So the base is HEAD's first parent there.
+  # On any other checkout, it is the merge base with the base branch as fetched now, and with the
+  # event's base commit only when that branch was not fetched.
   second=$(git rev-parse -q --verify 'HEAD^2' 2> /dev/null)
+  base=$EP_BASE
+  git rev-parse -q --verify "refs/remotes/origin/${EP_BASE_REF:-}" > /dev/null 2>&1 && base=refs/remotes/origin/$EP_BASE_REF
   if [ -n "$second" ] && [ "$second" = "$(git rev-parse -q --verify "${EP_HEAD:-}^{commit}" 2> /dev/null)" ]; then
     git rev-parse 'HEAD^1' > "$out/merge_base"
   else
-    git merge-base "$EP_BASE" HEAD > "$out/merge_base" 2> "$err" ||
-      { rc=$?; echo "no merge base with $EP_BASE ($(why "$rc" "$err")); check out with fetch-depth: 0"; return 1; }
+    git merge-base "$base" HEAD > "$out/merge_base" 2> "$err" ||
+      { rc=$?; echo "no merge base with $base ($(why "$rc" "$err")); check out with fetch-depth: 0"; return 1; }
   fi
 }
 
@@ -113,7 +118,8 @@ python_tools() {
   venv=$(dirname "$(dirname "$(python_bin ruff)")")
   [ -f "$venv/installed" ] && return
   python3 -m venv "$venv" &&
-    "$venv/bin/pip" install -q --require-hashes --only-binary=:all: -r "$here/tools/requirements.txt" > /dev/null &&
+    timeout "$TIMEOUT" "$venv/bin/pip" install -q --require-hashes --only-binary=:all: \
+      -r "$here/tools/requirements.txt" > /dev/null &&
     touch "$venv/installed"
 }
 python_bin() { echo "$tools/python-$(sha256sum < "$here/tools/requirements.txt" | cut -c1-12)/bin/$1"; }
@@ -204,10 +210,11 @@ check_knip() {
 }
 
 check_deadcode() {
-  local dir goos rc gover bin
+  local dir goos rc gover bin moddir gooses=()
+  local each='{{$.Dir}}/{{.}}{{"\n"}}'
   enabled go || { say deadcode "not configured"; return; }
   dir=$(cfg '.go.root // "."')
-  goos=$(cfg '.go.goos // "linux"')
+  mapfile -t gooses < <(cfg '.go.goos // "linux" | if type == "array" then .[] else . end')
   # Download first (this also fetches any toolchain go.mod asks for): a network failure is "not run".
   env -C "$dir" timeout "$TIMEOUT" go mod download 2> "$out/deadcode.err" || {
     rc=$?
@@ -226,11 +233,36 @@ check_deadcode() {
   [ -x "$bin" ] || GOBIN=$(dirname "$bin") GOTOOLCHAIN=$gover+auto timeout "$TIMEOUT" \
     go install "golang.org/x/tools/cmd/deadcode@v$DEADCODE" 2> "$out/deadcode.err" ||
     { rc=$?; say deadcode "not run: cannot install deadcode with $gover: $(why "$rc" "$out/deadcode.err")"; return; }
-  # With the network off, a load failure is the repository's own code.
-  env -C "$dir" GOOS="$goos" GOPROXY=off timeout "$TIMEOUT" "$bin" -test ./... > "$out/deadcode.txt" 2> "$out/deadcode.err"
-  rc=$?
-  [ "$rc" != 124 ] || { say deadcode "not run: deadcode $(why "$rc" "$out/deadcode.err")"; return; }
-  [ "$rc" = 0 ] || { say deadcode "failed: deadcode cannot load the packages (GOOS=$goos): $(why "$rc" "$out/deadcode.err")"; return; }
+  moddir=$(dirname "$(env -C "$dir" go env GOMOD)")
+  : > "$out/deadcode.runs"
+  for goos in "${gooses[@]}"; do
+    # With the network off, a load failure is the repository's own code.
+    env -C "$dir" GOOS="$goos" GOPROXY=off timeout "$TIMEOUT" "$bin" -test ./... > "$out/deadcode.$goos.txt" 2> "$out/deadcode.err"
+    rc=$?
+    [ "$rc" != 124 ] || { say deadcode "not run: deadcode (GOOS=$goos) $(why "$rc" "$out/deadcode.err")"; return; }
+    [ "$rc" = 0 ] || { say deadcode "failed: deadcode cannot load the packages (GOOS=$goos): $(why "$rc" "$out/deadcode.err")"; return; }
+    # The files this GOOS builds ("built<TAB>GOOS<TAB>path", relative to the module like deadcode's
+    # paths), then its findings ("dead<TAB>finding").
+    env -C "$dir" GOOS="$goos" GOPROXY=off go list -f \
+      "{{range .GoFiles}}$each{{end}}{{range .CgoFiles}}$each{{end}}{{range .TestGoFiles}}$each{{end}}{{range .XTestGoFiles}}$each{{end}}" \
+      ./... 2> "$out/deadcode.err" |
+      awk -v prefix="$moddir/" -v goos="$goos" 'index($0, prefix) == 1 { print "built\t" goos "\t" substr($0, length(prefix) + 1) }' \
+      >> "$out/deadcode.runs" ||
+      { rc=$?; say deadcode "failed: go list cannot load the packages (GOOS=$goos): $(why "$rc" "$out/deadcode.err")"; return; }
+    sed 's/^/dead\t/' "$out/deadcode.$goos.txt" >> "$out/deadcode.runs"
+  done
+  # A function is dead only if every GOOS that builds its file reports it: a helper in a shared file
+  # called only from one platform's files is live in that platform's build.
+  awk -F '\t' '
+    $1 == "built" { built[$2, $3] = 1; gooses[$2] = 1; next }
+    { finding = substr($0, 6); if (!(finding in hits)) order[++m] = finding; hits[finding]++ }
+    END {
+      for (j = 1; j <= m; j++) {
+        split(order[j], part, ":"); need = 0
+        for (g in gooses) need += ((g, part[1]) in built)
+        if (hits[order[j]] == need) print order[j]
+      }
+    }' "$out/deadcode.runs" > "$out/deadcode.txt"
   cfg '.go.ignore // [] | .[]' > "$out/deadcode.ignore"
   grep -Ev -f "$out/deadcode.ignore" "$out/deadcode.txt" > "$out/deadcode.kept" 2> "$out/deadcode.err"
   rc=$?
