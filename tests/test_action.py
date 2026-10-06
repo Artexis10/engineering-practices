@@ -235,6 +235,22 @@ class Gate(unittest.TestCase):
         self.assertEqual(code, 1, status)
         self.assertIn("cmd/app/extra.go:3: unreachable func: unreachable", findings)
 
+    def test_go_check_in_a_symlinked_workspace_reports_dead_code(self):
+        path, base = repository(GO, {"main_windows.go": "package main\n\nfunc unreachable() {}\n"})
+        link = Path(tempfile.mkdtemp(prefix="ep-link-")) / "workspace"
+        link.symlink_to(path)
+        proc, out = run(link, base, str(SCRIPTS / "checks.sh"), "gate", PWD=str(link))
+        status, findings = result(out, "deadcode")
+        self.assertEqual(proc.returncode, 1, status)
+        self.assertIn("main_windows.go:3: unreachable func: unreachable", findings)
+
+    def test_spent_time_budget_leaves_a_download_not_run(self):
+        tools = tempfile.mkdtemp(prefix="ep-tools-")  # empty, so reviewdog must be downloaded
+        code, out = gate(JS, {"web/src/note.ts": "x\n"}, EP_BUDGET="0", EP_TOOLS=tools)
+        status, _ = result(out, "knip")
+        self.assertEqual(code, 0, status)
+        self.assertEqual(status, "not run: cannot install reviewdog: time budget of 0s used up")
+
     def test_spent_time_budget_is_neutral_and_reported(self):
         code, out = gate(
             JS, {"web/src/util.ts": UTIL + "\nexport function addedDead() {\n  return 3;\n}\n"}, EP_BUDGET="0"
@@ -322,8 +338,9 @@ class Report(unittest.TestCase):
         self.assertEqual(row(report, "tests"), ["tests", "1", "3", "0"])
         self.assertIn("Product +3 lines against proof +3 lines (tests)", report)
 
-    def test_lockfiles_count_as_generated(self):
-        base = {".github/quality.yml": "classes:\n  tests: ['tests/*']\n", "web/package-lock.json": "{\n}\n"}
+    def test_lockfiles_count_as_generated_even_under_a_product_glob(self):
+        config = "classes:\n  tests: ['tests/*']\n  product: ['web/*']\n"
+        base = {".github/quality.yml": config, "web/package-lock.json": "{\n}\n"}
         report = self.report(base, {"web/package-lock.json": '{\n  "a": 1,\n  "b": 2\n}\n', "src/app.ts": "a\nb\n"})
         self.assertEqual(row(report, "generated"), ["generated", "1", "2", "0"])
         self.assertIn("Product +2 lines against proof +0 lines", report)

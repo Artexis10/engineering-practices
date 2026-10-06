@@ -91,9 +91,12 @@ as do excludes. A Python file that does not parse is reported on its added lines
 pinned ruff cannot load fails the gate on purpose, so keep it compatible with the version in
 `tools/requirements.txt`.
 
-**Time.** The action has one time budget, `EP_BUDGET` seconds (default 720), across its steps. Each tool
-runs for at most 600 seconds or what is left of the budget. A step that cannot start or finish within it
-reports "not run" and a warning, so the job ends inside the template's `timeout-minutes: 15`.
+**Time.** The action has one time budget, `EP_BUDGET` seconds (default 720), from the start of its first
+step. Each download and each tool runs for at most 600 seconds or what is left of the budget, and a step
+that cannot start or finish within it reports "not run" and a warning. The report may run 60 seconds past
+the budget to post; a runtime measure or comment it cannot finish by then says "not run: time budget used
+up". So the action ends within 13 minutes of starting, inside the template's `timeout-minutes: 15` when
+checkout takes under two minutes.
 
 ## `.github/quality.yml`
 
@@ -106,15 +109,15 @@ runtime import, and never ships in a bundle. A deploy or migration script, a dat
 mock that ships in the production bundle is product. Name proof tooling by file or by a narrow glob,
 never a whole `scripts/` directory.
 
-These lockfiles are "generated" at any depth unless a class you list matches them first:
+These lockfiles are always "generated" at any depth, whatever class you list also matches them:
 `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock`, `bun.lockb`,
 `Cargo.lock`, `go.sum`, `uv.lock`, `poetry.lock`, `Pipfile.lock`, `composer.lock` and `Gemfile.lock`.
 
 ```yaml
 # Path classes for proof weight. Patterns are glob patterns on repository-relative paths, where `*`
 # also matches `/` (so `*.test.ts` matches at any depth). A file takes the first class, in the order
-# listed, whose pattern matches. A lockfile that matches none is "generated"; any other file that
-# matches none is product. Class names are free-form; every class except product, docs and generated
+# listed, whose pattern matches; lockfiles are always "generated", and any other file that matches
+# none is product. Class names are free-form; every class except product, docs and generated
 # counts as proof, and generated and docs count as neither.
 classes:
   fixtures: ["tests/fixtures/*"]

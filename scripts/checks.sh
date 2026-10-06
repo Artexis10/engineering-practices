@@ -77,7 +77,7 @@ enabled() { jq -e --arg key "$1" '(. // {}) | has($key)' "$out/config.json" > /d
 
 # fetch <url> <sha256> <dest>: download a pinned file and check its digest
 fetch() {
-  curl -sSfL --retry 2 --connect-timeout 30 --max-time 300 -o "$3.part" "$1" || return
+  bounded curl -sSfL --retry 2 --connect-timeout 30 --max-time 300 -o "$3.part" "$1" || return
   echo "$2  $3.part" | sha256sum -c --quiet - > /dev/null 2>&1 || { echo "sha256 checksum mismatch for $1" >&2; return 1; }
   mv "$3.part" "$3"
 }
@@ -230,7 +230,7 @@ check_deadcode() {
   dir=$(cfg '.go.root // "."')
   mapfile -t gooses < <(cfg '.go.goos // "linux" | if type == "array" then .[] else . end')
   # Download first (this also fetches any toolchain go.mod asks for): a network failure is "not run".
-  bounded env -C "$dir" go mod download 2> "$out/deadcode.err" || {
+  bounded env -u PWD -C "$dir" go mod download 2> "$out/deadcode.err" || {
     rc=$?
     if grep -q 'errors parsing go.mod' "$out/deadcode.err"; then
       say deadcode "failed: go.mod does not parse: $(grep -m1 -A1 'errors parsing go.mod' "$out/deadcode.err" | tail -n1)"
@@ -241,26 +241,28 @@ check_deadcode() {
   }
   # deadcode type-checks with the Go it was built with, so build it with the Go this module selects
   # (+auto lets it go newer if x/tools itself needs that).
-  gover=$(env -C "$dir" go env GOVERSION 2> "$out/deadcode.err") ||
+  gover=$(env -u PWD -C "$dir" go env GOVERSION 2> "$out/deadcode.err") ||
     { rc=$?; say deadcode "not run: cannot tell which Go the module selects: $(why "$rc" "$out/deadcode.err")"; return; }
   bin=$tools/deadcode-$DEADCODE-$gover/deadcode
   [ -x "$bin" ] || bounded env GOBIN="$(dirname "$bin")" GOTOOLCHAIN="$gover+auto" \
     go install "golang.org/x/tools/cmd/deadcode@v$DEADCODE" 2> "$out/deadcode.err" ||
     { rc=$?; say deadcode "not run: cannot install deadcode with $gover: $(why "$rc" "$out/deadcode.err")"; return; }
   # Both tools are matched on absolute paths: deadcode prints a file under its directory relative to
-  # it and any other file absolute, and go list prints absolute directories.
+  # it and any other file absolute, and go list prints absolute directories. Every Go command runs
+  # without PWD, so Go resolves its directory physically, as pwd -P and git do, even in a symlinked
+  # workspace.
   absdir=$(cd "$dir" && pwd -P)
   top=$(git rev-parse --show-toplevel)
   : > "$out/deadcode.runs"
   for goos in "${gooses[@]}"; do
     # With the network off, a load failure is the repository's own code.
-    bounded env -C "$dir" GOOS="$goos" GOPROXY=off "$bin" -test ./... > "$out/deadcode.$goos.txt" 2> "$out/deadcode.err"
+    bounded env -u PWD -C "$dir" GOOS="$goos" GOPROXY=off "$bin" -test ./... > "$out/deadcode.$goos.txt" 2> "$out/deadcode.err"
     rc=$?
     [ "$rc" != 124 ] || { say deadcode "not run: deadcode (GOOS=$goos) $(why "$rc" "$out/deadcode.err")"; return; }
     [ "$rc" = 0 ] || { say deadcode "failed: deadcode cannot load the packages (GOOS=$goos): $(why "$rc" "$out/deadcode.err")"; return; }
     # The files this GOOS builds, its packages' dependencies included ("built<TAB>GOOS<TAB>path"),
     # then its findings ("dead<TAB>finding").
-    env -C "$dir" GOOS="$goos" GOPROXY=off go list -deps -test -f \
+    env -u PWD -C "$dir" GOOS="$goos" GOPROXY=off go list -deps -test -f \
       "{{range .GoFiles}}$each{{end}}{{range .CgoFiles}}$each{{end}}{{range .TestGoFiles}}$each{{end}}{{range .XTestGoFiles}}$each{{end}}" \
       ./... 2> "$out/deadcode.err" | awk -v goos="$goos" '{ print "built\t" goos "\t" $0 }' >> "$out/deadcode.runs" ||
       { rc=$?; say deadcode "failed: go list cannot load the packages (GOOS=$goos): $(why "$rc" "$out/deadcode.err")"; return; }

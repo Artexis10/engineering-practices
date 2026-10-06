@@ -11,6 +11,7 @@ import json
 import os
 import statistics
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -29,7 +30,7 @@ MEASURES = [
     ("vulture", "Python definitions nothing references (vulture, confidence 60+)"),
 ]
 NOT_PROOF = {"product", "docs", "generated"}  # every other path class counts as proof
-# Lockfiles at any depth are "generated" unless a configured class matches them first.
+# Lockfiles at any depth are always "generated", whatever configured class also matches them.
 LOCKFILES = [
     "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb",
     "Cargo.lock", "go.sum", "uv.lock", "poetry.lock", "Pipfile.lock", "composer.lock", "Gemfile.lock",
@@ -39,6 +40,16 @@ SAMPLES, MINIMUM = 5, 3  # main runs in the runtime median; fewer than MINIMUM i
 
 env = os.environ.get
 OUT = Path(env("EP_OUT") or Path(os.environ["RUNNER_TEMP"]) / "engineering-practices" / "out")
+# The checks share one time budget from their first start; the report may run RESERVE seconds past it
+# to post, and the runtime measure stops POSTING seconds before that so posting keeps its time.
+RESERVE, POSTING = 60, 20
+_started = OUT / "started"
+DEADLINE = int(_started.read_text()) + int(env("EP_BUDGET") or 720) + RESERVE if _started.exists() else None
+
+
+class BudgetSpent(Exception):
+    def __str__(self):
+        return "time budget used up"
 
 
 def cell(value):
@@ -55,15 +66,24 @@ def git(*args):
     return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
 
 
-def api(path, method="GET", body=None):
+def api(path, method="GET", body=None, keep=0):
+    """Call the GitHub API, leaving `keep` seconds of the deadline for later work."""
+    left = 30 if DEADLINE is None else min(30, DEADLINE - keep - time.time())
+    if left <= 0:
+        raise BudgetSpent
     request = urllib.request.Request(
         env("GITHUB_API_URL", "https://api.github.com") + path,
         method=method,
         data=None if body is None else json.dumps(body).encode(),
         headers={"Authorization": f"Bearer {env('GITHUB_TOKEN')}", "Accept": "application/vnd.github+json"},
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=left) as response:
+            return json.load(response)
+    except (TimeoutError, urllib.error.URLError) as error:
+        if DEADLINE is not None and time.time() >= DEADLINE - keep:
+            raise BudgetSpent from error
+        raise
 
 
 def checks(rows):
@@ -117,8 +137,8 @@ def proof_weight(config, base):
             i += 1
         else:  # a rename: the old path, then the new one
             path, i = fields[i + 2], i + 3
-        name = next((c for c, globs in classes.items() if any(matches(path, g) for g in globs)), None)
-        name = name or ("generated" if path.rsplit("/", 1)[-1] in LOCKFILES else "product")
+        name = "generated" if path.rsplit("/", 1)[-1] in LOCKFILES else None
+        name = name or next((c for c, globs in classes.items() if any(matches(path, g) for g in globs)), "product")
         row = totals.setdefault(name, [0, 0, 0, 0])
         row[0] += 1
         if added == "-":
@@ -142,8 +162,7 @@ def proof_weight(config, base):
             f"Product +{product} lines against proof +{proof_added} lines"
             f" ({cell(', '.join(proof)) or 'no proof classes changed'})."
         ),
-        "A file that matches no class counts as product; generated files (lockfiles by default) and docs count"
-        " as neither.",
+        "A file that matches no class counts as product; lockfiles and other generated files, and docs, count as neither.",
         "Proof that outweighs the product it covers needs a reason in review.",
     ]
 
@@ -170,16 +189,18 @@ def runtime(config):
     if not (env("GITHUB_TOKEN") and repo and run_id and branch):
         return ["Not run: no GitHub Actions context (token, repository, run and default branch)."]
     try:
-        current = {job["name"]: job for job in api(f"/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100")["jobs"]}
-        workflow = api(f"/repos/{repo}/actions/runs/{run_id}")["workflow_id"]
+        jobs = api(f"/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100", keep=POSTING)["jobs"]
+        current = {job["name"]: job for job in jobs}
+        workflow = api(f"/repos/{repo}/actions/runs/{run_id}", keep=POSTING)["workflow_id"]
         runs = api(
-            f"/repos/{repo}/actions/workflows/{workflow}/runs?branch={branch}&event=push&status=completed&per_page=20"
+            f"/repos/{repo}/actions/workflows/{workflow}/runs?branch={branch}&event=push&status=completed&per_page=20",
+            keep=POSTING,
         )["workflow_runs"]
         history = {name: [] for name in names}
         for run in runs:
             if all(len(past) == SAMPLES for past in history.values()):
                 break
-            for job in api(f"/repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100")["jobs"]:
+            for job in api(f"/repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100", keep=POSTING)["jobs"]:
                 mine, past = current.get(job["name"]), history.get(job["name"])
                 if (
                     past is not None
@@ -189,6 +210,8 @@ def runtime(config):
                     and runner(job) == runner(mine)
                 ):
                     past.append(seconds(job))
+    except BudgetSpent:
+        return ["Not run: time budget used up."]
     except Exception as error:  # noqa: BLE001 - an API or data surprise leaves this measure "not run"
         return [f"Not run: could not read job times from the GitHub Actions API ({error!r})."]
     lines = [
@@ -283,6 +306,8 @@ def publish(body):
             message = None
         detail = cell(f"{error.code} {message or error.reason}")
         return f"Not posted as a pull request comment: GitHub answered HTTP {detail}. This summary is the report."
+    except BudgetSpent:
+        return "Not posted as a pull request comment: time budget used up. This summary is the report."
     except Exception as error:  # noqa: BLE001 - a network or data surprise leaves the summary as the report
         return f"Not posted as a pull request comment: {error!r}. This summary is the report."
     return None
