@@ -34,8 +34,9 @@ A practice whose only enforcers are review or instruction is listed under [Gaps]
 | C1 | No new dead code: no unused file, export or dependency (TS/JS), no unreachable function (Go), and no unused import or variable, undefined name or redefinition (Python) on the lines a pull request adds. | [Hugo 10-05] | gate (knip, deadcode, ruff's F rules on added lines); report (vulture for unreferenced Python definitions) | Dead weight that the 2026-10-05 audit removed by the thousand lines | An entry point the tool cannot see (framework file, dynamic dispatch) blocks the PR until an ignore entry lands in `.github/quality.yml`, where review sees it. Editing the declaration line of an export, function or import that was already unused also fails; the remedy is deleting it | Author agent, minutes |
 | C2 | DRY of knowledge in product code: one source for each rule, value or vendored file. A second copy needs an import, generator or dependency that keeps it in step, or names the change that deletes it. | [PragProg], DRY is about knowledge; [Hugo 10-01] | report (jscpd duplicate code, exact token clones, on added lines); review | Copies that drift apart | jscpd flags copies that encode different knowledge (boilerplate, DAMP tests); the reviewer dismisses it (see C3, T6) | Reviewer, seconds |
 | C3 | Prefer duplication over the wrong abstraction. Do not merge code that merely looks alike; inline an abstraction that has grown a parameter per caller. | [Metz] | review | Shared helpers bent to fit every caller | Real shared knowledge stays duplicated; the test is whether the copies encode the same rule (C2) | Reviewer, minutes |
-| C4 | Copying is not a justification, and new code sets the pattern the next change copies. Name an unsound existing pattern and propose a better shape. | [Hugo 10-01] | instruction | Unsound patterns spreading by imitation | The author spends minutes on a pattern that was fine | Author agent, minutes |
+| C4 | Copying is not a justification, and new code sets the pattern the next change copies. Name an unsound existing pattern and propose a better shape. | [Hugo 10-01] | instruction; gate (C6, for the patterns copied most) | Unsound patterns spreading by imitation | The author spends minutes on a pattern that was fine | Author agent, minutes |
 | C5 | No new lint findings on the lines a pull request adds: no ESLint error under the repository's own config, no staticcheck finding (Go), no ShellCheck warning or error in a changed shell script. Each linter is turned on per repository in `.github/quality.yml`. | [Hugo 10-06] | gate (ESLint, staticcheck, ShellCheck on added lines) | ESLint: code that breaks the rules the repository's own config sets. staticcheck: Go bugs (ignored errors, impossible conditions, misused standard library calls) and needless complexity. ShellCheck: quoting, word-splitting and portability bugs in the scripts that build, deploy and operate the product | A rule the team disagrees with, or a check that misreads the code, blocks the PR until a disable comment or config entry lands, where review sees it. Editing a line that already had a finding also fails; the remedy is fixing that line. ShellCheck notes and style findings (such as SC2086 quoting) do not count unless `shellcheck.args` lowers the severity | Author agent, minutes |
+| C6 | Code does not decide what a person meant with a word list or a word regex, does not read a generated structured language (SQL, HTML, XML) with a regex, and does not fix in code knowledge that is or will become configurable or evolving (stages, statuses, entity or relation types, domain vocabularies). A check of a field's format and a closed machine format are fine. | [Hugo 10-07] | gate (semgrep, `rules/banned-patterns.yml` plus the repository's own rules, on added lines); report (coded vocabularies are listed, not failed); review (each `# nosemgrep: <rule> -- <reason>`) | Word lists that miss phrasings and grow one case at a time, regexes that break when a model's output changes shape, values a customer cannot change without a deploy | A format or machine-format check the rules cannot tell apart blocks the pull request until the author narrows the rule or keeps the line with a reason that review accepts | Author agent, minutes; reviewer, seconds per reason |
 
 ## Weight and tooling
 
@@ -67,10 +68,13 @@ These practices have no automated enforcer; they rely on the author and the inde
 
 - **Review, with or without an instruction:** T1, T2, T3 (proof weight hints at T1 and T3 but cannot
   judge them), T5, T6, T7, T8, C3, W2, W3, K1, K3.
-- **Instruction only:** C4, K2, K4.
+- **Instruction only:** K2, K4.
 - **Partly covered:** C1 does not catch a callee left dead when a pull request removes its caller in another
   file; the monthly gardener sweeps that. For Python the gate covers ruff's F rules only; unreferenced
   definitions are the vulture measure, which a reviewer judges.
+- **Partly covered:** C4 is gated only for the patterns C6 names. C6 reads Python only, finds a person's text
+  by the names it usually has, and lists coded vocabularies without failing. A bare `# nosemgrep` with no
+  reason also passes the gate; review refuses it and covers the rest.
 
 An automated enforcer for a gap is welcome when it passes K1: what it prevents must outweigh what its
 wrong fires cost.
@@ -108,6 +112,8 @@ repository's CI passes on `main` (see the [README](README.md)).
   helps find untested code; as a numeric target it says little about how good the tests are.
 - [Hugo 10-01]: Hugo's engineering rules, 2026-10-01, "Tests and tooling must justify themselves".
 - [Hugo 09-04]: Hugo's engineering rules, 2026-09-04, "Controls must justify themselves".
+- [Hugo 10-07]: Hugo's ruling, 2026-10-07, after two reviewed changes copied word lists and regexes over SQL and
+  HTML: ban them or restrain them hard. Context decides: a format check or a closed machine format is fine.
 - [Hugo 10-05]: Hugo's ruling, 2026-10-05, after the audit of every repository: dead-code gate, no coverage
   gates, merges wait for their own CI.
 - [Hugo 10-06]: Hugo's approval, 2026-10-06, of automatic checks across all repositories: linters on added lines join the gate.

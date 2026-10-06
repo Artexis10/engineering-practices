@@ -1,0 +1,230 @@
+# Banned patterns (practice C6). Three things go wrong when code matches words or text:
+# deciding what a person meant, reading a generated structured language with a regex, and
+# fixing in code knowledge that is, or will become, configurable or evolving.
+#
+# A regex or a fixed list is fine for a field's format (an email address, a postcode, a
+# phone number) and for a closed machine format (file extensions, a protocol's fixed tokens,
+# ISO codes, a provider's documented enum, a log format the code itself writes). When one of
+# those trips a rule, narrow the rule first; a nosemgrep line is the last resort.
+#
+# Severity: ERROR fails the gate on a line a pull request adds. WARNING is listed for the
+# reviewer and fails nothing. Every finding may be kept with a reviewed reason:
+#   # nosemgrep: <rule-id> -- <reason>
+
+rules:
+  - id: ep-lexical-intent
+    languages: [python]
+    severity: ERROR
+    message: >-
+      ep-lexical-intent: a word list or a word regex decides what a person meant. Word
+      lists miss phrasings, negations and other languages, and they grow one case at a
+      time. Sound shapes: a model reads the text against the pending state and returns
+      structured output, and code enforces only the safety rules; or the interface asks
+      the person to choose. A check of a field's format, or of a closed machine format,
+      is fine: keep it with `# nosemgrep: ep-lexical-intent -- <reason>`, which the
+      reviewer checks. If you cannot decide, ask the operator.
+    metadata:
+      example: |
+        CONFIRM_WORDS = {"yes", "ok", "sure"}
+        if all(word in CONFIRM_WORDS for word in message_text.lower().split()): ...
+    mode: taint
+    pattern-sources:
+      # A value named for text a person wrote.
+      - patterns:
+          - pattern-either:
+              - pattern: $NAME
+              - pattern: $OBJ.$NAME
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: ^(text|question|reply|utterance|user_text|user_message|message_text|user_input)$
+      # Text split into words: only prose is split into words to be looked up.
+      - pattern: $X.split()
+      - pattern: $X.split(" ")
+      - patterns:
+          - pattern-either:
+              - pattern: re.findall($P, ...)
+              - pattern: re.finditer($P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: ^[rR]?["'](\\w|\[[^\]]*\][*+])
+      - patterns:
+          - pattern: re.split($P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: ^[rR]?["'](\\W|\\s)
+      # A list built from those words. Semgrep loses the taint inside a comprehension that
+      # reshapes each word, so the comprehension itself is a source.
+      - patterns:
+          - pattern-either:
+              - pattern: '[$E for $V in $IT]'
+              - pattern: '[$E for $V in $IT if $C]'
+          - metavariable-regex:
+              metavariable: $IT
+              regex: (?s)^(.*\.split\(\s*(" ")?\)|re\.(findall|finditer|split)\(.*)$
+    # A call's result is no longer the text, unless the call reshapes, tests or matches it.
+    pattern-sanitizers:
+      - patterns:
+          - pattern-either:
+              - patterns:
+                  - pattern: $F(...)
+                  - metavariable-regex:
+                      metavariable: $F
+                      regex: ^(?!(str|set|frozenset|list|tuple|sorted|reversed|all|any|bool|next|filter|map|enumerate|zip)$)[A-Za-z_]\w*$
+              - patterns:
+                  - pattern: $O.$M(...)
+                  - pattern-not: re.$RE(...)
+                  - metavariable-regex:
+                      metavariable: $M
+                      regex: ^(?!(lower|upper|casefold|strip|lstrip|rstrip|replace|split|rsplit|splitlines|join|translate|removeprefix|removesuffix|format|title|capitalize|normalize|search|match|fullmatch|findall|finditer|sub|subn|startswith|endswith)$)
+    pattern-sinks:
+      # Membership in a set of words: a constant, or a literal of strings. A constant named
+      # for a machine format (codes, countries, currencies, extensions, domains) is not one.
+      - patterns:
+          - pattern-either:
+              - pattern: $T in $WORDS
+              - pattern: $T not in $WORDS
+              - pattern: $T & $WORDS
+              - pattern: $WORDS & $T
+              - pattern: $T - $WORDS
+              - pattern: $T.issubset($WORDS)
+              - pattern: $T.intersection($WORDS)
+              - pattern: $T.isdisjoint($WORDS)
+              - pattern: set($T) <= $WORDS
+              - pattern: set($T) < $WORDS
+          - metavariable-regex:
+              metavariable: $WORDS
+              regex: ^(?!.*(CODE|COUNTR|CURRENC|EXTENSION|MIME|TLD|DOMAIN|LOCALE|TIMEZONE|UNIT))_?[A-Z][A-Z0-9_]*$
+          - focus-metavariable: $T
+      - patterns:
+          - pattern-either:
+              - pattern: $T in ("...", ...)
+              - pattern: $T not in ("...", ...)
+              - pattern: $T in {"...", ...}
+              - pattern: $T not in {"...", ...}
+              - pattern: $T in ["...", ...]
+              - pattern: $T not in ["...", ...]
+          - focus-metavariable: $T
+      # A word or phrase looked for in the text, or the text compared with one.
+      - patterns:
+          - pattern-either:
+              - pattern: '"$W" in $T'
+              - pattern: '"$W" not in $T'
+              - pattern: $T == "$W"
+              - pattern: $T != "$W"
+              - pattern: $T.startswith("$W", ...)
+              - pattern: $T.endswith("$W", ...)
+          - metavariable-regex:
+              metavariable: $W
+              regex: ^[A-Za-z][A-Za-z' ]+$
+          - focus-metavariable: $T
+      # A regex of words run over the text: \bword\b, or an alternation of words. A format
+      # regex has neither; an alternation after \. is a list of file extensions.
+      - patterns:
+          - pattern-either:
+              - pattern: re.$FN($PAT, $T, ...)
+              - pattern: re.$FN($PAT, $REPL, $T, ...)
+              - patterns:
+                  - pattern-inside: |
+                      $R = re.compile($PAT, ...)
+                      ...
+                  - pattern-either:
+                      - pattern: $R.$FN($T, ...)
+                      - pattern: $R.$FN($REPL, $T, ...)
+          - metavariable-regex:
+              metavariable: $FN
+              regex: ^(search|match|fullmatch|findall|finditer|sub|subn|split)$
+          - metavariable-regex:
+              metavariable: $PAT
+              regex: (?s).*(\\b\(?(\?:)?[A-Za-z]{2,}(\\b|\|)|((?<!\\\.)\((\?:)?|["'])(((?!\\\.\()[^|"'])*\|)*[A-Za-z]([A-Za-z' -]|\\s[+*?]?|\?){2,}\|)
+          - focus-metavariable: $T
+
+  - id: ep-regex-over-sql
+    languages: [python]
+    severity: ERROR
+    message: >-
+      ep-regex-over-sql: a regex reads SQL text. SQL nests, quotes and aliases in ways a
+      regex cannot follow, and a model's SQL changes shape when the model or prompt
+      changes. Sound shapes: the generator returns the structure you need next to the
+      SQL, or a real SQL parser reads it. A fixed statement the code itself writes is
+      fine: keep it with `# nosemgrep: ep-regex-over-sql -- <reason>`, which the reviewer
+      checks. If you cannot decide, ask the operator.
+    metadata:
+      example: |
+        ALIAS_RE = re.compile(r"\bfrom\s+(\w+)\s+(?:as\s+)?(\w+)", re.I)
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern: re.$FN($PAT, ...)
+              - metavariable-regex:
+                  metavariable: $PAT
+                  # A SQL keyword, or a word SQL shares with prose beside an identifier class.
+                  regex: (?is).*((select|where|join|having|coalesce|union|returning|ilike|distinct|intersect|insert|truncate|(group|order)\\s[*+]?by)(\\b|\\s)|(\\b|\\s[*+?]?|[^a-z\\])(as|on|from|into|values|limit|offset|over)(\\s|\\b).*\[a-z_\]|\[a-z_\].*(\\b|\\s[*+?]?|[^a-z\\])(as|on|from|into|values|limit|offset|over)(\\s|\\b))
+          # Any regex run over a value named for SQL.
+          - patterns:
+              - pattern-either:
+                  - pattern: re.$FN($PAT, $ARG, ...)
+                  - pattern: re.$FN($PAT, $REPL, $ARG, ...)
+              - metavariable-regex:
+                  metavariable: $ARG
+                  regex: (?i)^(?!.*(path|file|name|dir)).*sql
+          - patterns:
+              - pattern-either:
+                  - pattern: $R.$FN($ARG, ...)
+                  - pattern: $R.$FN($REPL, $ARG, ...)
+              - metavariable-regex:
+                  metavariable: $R
+                  regex: (?i).*(_re|_regex|_pattern)$
+              - metavariable-regex:
+                  metavariable: $ARG
+                  regex: (?i)^(?!.*(path|file|name|dir)).*sql
+      - metavariable-regex:
+          metavariable: $FN
+          regex: ^(compile|search|match|fullmatch|findall|finditer|sub|subn|split)$
+
+  - id: ep-regex-over-markup
+    languages: [python]
+    severity: ERROR
+    message: >-
+      ep-regex-over-markup: a regex reads or converts HTML or XML. Markup nests, quotes and
+      escapes in ways a regex cannot follow, and senders change their markup without
+      notice. Sound shapes: a real parser, such as BeautifulSoup with lxml for HTML, or
+      xml.etree or lxml for XML. A check that is not reading markup (escaping a delimiter
+      the code itself defines) is fine: keep it with
+      `# nosemgrep: ep-regex-over-markup -- <reason>`, which the reviewer checks. If you
+      cannot decide, ask the operator.
+    metadata:
+      example: |
+        LINK_RE = re.compile(r"<a\b[^>]*href=\"([^\"]*)\"", re.I)
+    patterns:
+      - pattern: re.$FN($PAT, ...)
+      - metavariable-regex:
+          metavariable: $FN
+          regex: ^(compile|search|match|fullmatch|findall|finditer|sub|subn|split)$
+      # A tag (<a, </, <!--, <\w), a tag body ([^>]), an attribute (href=), an entity (&#).
+      - metavariable-regex:
+          metavariable: $PAT
+          regex: (?s).*((?<!\?P)(?<!\?)<[A-Za-z!/]|<\\?/|<\\w|<\\s[*]?/|<\[|\[\^>|(href|src)(\\s[*+?]?)?=|&#(\\d|x|\[|0)|&\(\?:)
+
+  - id: ep-coded-vocabulary
+    languages: [python]
+    severity: WARNING
+    message: >-
+      ep-coded-vocabulary: a fixed list holds domain knowledge, such as stages, statuses,
+      entity or relation types, or a domain vocabulary. Such lists differ between customers
+      and change over time, and a list in code changes only with a deploy. Sound shapes:
+      keep the values as data or settings the system reads, or derive them from the data
+      itself. A closed machine format (a provider's documented enum) is fine: keep it
+      with `# nosemgrep: ep-coded-vocabulary -- <reason>`, which the reviewer checks. If you
+      cannot decide, ask the operator.
+    metadata:
+      example: |
+        DEAL_STAGES = ("lead", "qualified", "proposal", "won", "lost")
+    patterns:
+      - pattern: $NAME = $VALUES
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: (?i)^_?[A-Z0-9_]*((stage|relation|entit(y|ie)|vocab|vocabular(y|ie)|synonym|keyword|term|categor(y|ie)|industr(y|ie)|sector|segment|concept)s?|(entity|relation|node|edge|lead|deal|contact|company|campaign)_?(type|kind|status|statuse|state|stage)s?)$
+      # Three or more strings that are words: not extensions, codes or paths.
+      - metavariable-regex:
+          metavariable: $VALUES
+          regex: ^(frozenset\(|set\(|tuple\()?[\[({]\s*("[a-z][a-z ]*"\s*(:[^,]*)?,\s*){2}"[a-z][a-z ]*"

@@ -4,8 +4,9 @@
 # directory, over the diff between the pull request's base and HEAD.
 #
 #   checks.sh gate       dead code: knip (TS/JS), deadcode (Go) and ruff's F rules
-#                        (Python); and the linters the repository turns on: ESLint,
-#                        staticcheck and ShellCheck. Exits 1 when one reports a
+#                        (Python); the linters the repository turns on: ESLint,
+#                        staticcheck and ShellCheck; and semgrep's banned patterns
+#                        (rules/banned-patterns.yml). Exits 1 when one reports a
 #                        finding on a line the diff adds, or reports that the
 #                        repository's own input is broken
 #   checks.sh measures   jscpd and vulture; never fails
@@ -25,8 +26,9 @@
 set -uo pipefail
 
 # Pinned tools. knip and jscpd are pinned with their whole dependency tree by
-# tools/package-lock.json, ruff and vulture by tools/requirements.txt, and ESLint by the
-# repository's own lockfile. Moving a version is a change to these files, gated by the fixture tests.
+# tools/package-lock.json, ruff and vulture by tools/requirements.txt, semgrep with its whole
+# dependency tree by tools/semgrep-requirements.txt, and ESLint by the repository's own lockfile.
+# Moving a version is a change to these files, gated by the fixture tests.
 REVIEWDOG=0.21.2 REVIEWDOG_SHA256=30413aa3c7443e9c3c157fe5766cad40e3bb39a32e210ee69b710a8d5c4b8e51
 YQ=4.54.1 YQ_SHA256=8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
 SHELLCHECK=0.11.0 SHELLCHECK_SHA256=b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
@@ -42,7 +44,7 @@ export GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false"
 mode=${1:-}
 case $mode in
   # Cheapest first, so a slow npm install or Go build cannot leave the quick checks without budget.
-  gate) checks=(ruff shellcheck knip eslint deadcode staticcheck) ;;
+  gate) checks=(ruff shellcheck knip eslint semgrep deadcode staticcheck) ;;
   measures) checks=(jscpd vulture) ;;
   *) echo "usage: checks.sh gate|measures" >&2; exit 2 ;;
 esac
@@ -136,17 +138,18 @@ node_tools() {
 }
 node_bin() { echo "$tools/node-$(sha256sum < "$here/tools/package-lock.json" | cut -c1-12)/node_modules/.bin/$1"; }
 
-# python_tools: install ruff and vulture exactly as tools/requirements.txt pins them
+# python_tools [file]: install the tools exactly as tools/<file> pins them (default requirements.txt:
+# ruff and vulture)
 python_tools() {
   local venv
-  venv=$(dirname "$(dirname "$(python_bin ruff)")")
+  venv=$(dirname "$(dirname "$(python_bin pip "${1:-}")")")
   [ -f "$venv/installed" ] && return
   python3 -m venv "$venv" &&
     bounded "$venv/bin/pip" install -q --require-hashes --only-binary=:all: \
-      -r "$here/tools/requirements.txt" > /dev/null &&
+      -r "$here/tools/${1:-requirements.txt}" > /dev/null &&
     touch "$venv/installed"
 }
-python_bin() { echo "$tools/python-$(sha256sum < "$here/tools/requirements.txt" | cut -c1-12)/bin/$1"; }
+python_bin() { echo "$tools/python-$(sha256sum < "$here/tools/${2:-requirements.txt}" | cut -c1-12)/bin/$1"; }
 
 # npm_ci <check> <dir>: install the repository's dependencies in <dir> as its lockfile pins them,
 # without install scripts, once per run. On failure records <check>'s status and returns 1.
@@ -491,6 +494,48 @@ check_vulture() {
   unread=$(git diff --text --name-only "$mb" HEAD | grep -Fxf "$out/vulture.unread" | paste -sd, - | sed 's/,/, /g')
   [ -z "$unread" ] || grep -q '^not run' "$out/vulture.status" ||
     say vulture "partial, could not read $unread: $(cat "$out/vulture.status")"
+}
+
+check_semgrep() {
+  local rc path paths=() rules=() targets=() configs=(--config "$here/rules/banned-patterns.yml") gaveup
+  enabled semgrep || { say semgrep "not configured"; return; }
+  mapfile -t paths < <(cfg '.semgrep.paths // ["."] | .[]')
+  mapfile -t rules < <(cfg '.semgrep.rules // [] | .[]')
+  for path in "${paths[@]}" "${rules[@]}"; do # a missing path would pass having checked nothing
+    [ -e "$path" ] || { say semgrep "failed: semgrep in .github/quality.yml names $path, which does not exist"; return; }
+  done
+  for path in "${rules[@]}"; do configs+=(--config "$path"); done
+  # Every rule reads one file at a time, so only the files the pull request changes need reading.
+  mapfile -d '' -t targets < <(git diff --text -z --name-only --diff-filter=d "$mb" HEAD -- "${paths[@]}")
+  # With no code changed, a changed rule file still loads, against an empty file, so a broken one
+  # fails the pull request that broke it.
+  if [ "${#targets[@]}" = 0 ]; then
+    [ "${#rules[@]}" -gt 0 ] && [ -n "$(git diff --text --name-only "$mb" HEAD -- "${rules[@]}")" ] ||
+      { say semgrep passed; return; }
+    : > "$out/empty.py"
+    targets=("$out/empty.py")
+  fi
+  python_tools semgrep-requirements.txt 2> "$out/semgrep.err" ||
+    { rc=$?; say semgrep "not run: cannot install semgrep: $(why "$rc" "$out/semgrep.err")"; return; }
+  # One job: taint analysis gives up on a long function when it shares the CPU, and a large file
+  # needs more than semgrep's 5 seconds per rule. What it still gives up on is named below.
+  bounded env SEMGREP_ENABLE_VERSION_CHECK=0 "$(python_bin semgrep semgrep-requirements.txt)" scan "${configs[@]}" \
+    --metrics off --disable-version-check --jobs 1 --timeout 120 --max-target-bytes 0 --quiet \
+    --sarif-output "$out/semgrep.sarif" --json-output "$out/semgrep.json" -- "${targets[@]}" > /dev/null 2> "$out/semgrep.err"
+  rc=$? # 0 with or without findings; 4, 5, 7 or 8 when a rule file does not load; 2 for a bad pattern or a crash
+  if [ "${#rules[@]}" -gt 0 ] && { [[ $rc =~ ^[4578]$ ]] || { [ "$rc" = 2 ] &&
+      jq -e 'any(.errors[]?; .type == "Rule parse error")' "$out/semgrep.json" > /dev/null 2>&1; }; }; then # rules/ is tested here, so it is the repository's file
+    say semgrep "failed: semgrep cannot load the rule files: $(jq -r '.errors[0].message // empty' "$out/semgrep.json" 2> /dev/null | head -n1)"
+    return
+  fi
+  [ "$rc" = 0 ] || { say semgrep "not run: semgrep $(why "$rc" "$out/semgrep.err")"; return; }
+  # An ERROR finding fails on an added line; a WARNING is listed for the reviewer. A nosemgrep comment keeps one out.
+  filter semgrep . error -f=sarif < "$out/semgrep.sarif"
+  gaveup=$(jq -r '(.errors[]? | select(.type == "Timeout") | .path // empty),
+      (.time.fixpoint_timeouts[]?.message | capture("analysis at (?<path>[^:]+):").path)' "$out/semgrep.json" |
+    sort -u | paste -sd, - | sed 's/,/, /g')
+  [ -z "$gaveup" ] || grep -q '^not run' "$out/semgrep.status" ||
+    say semgrep "$(cat "$out/semgrep.status"); partial, semgrep gave up on part of $gaveup"
 }
 
 for check in "${checks[@]}"; do rm -f "$out/$check.status" "$out/$check.findings"; done

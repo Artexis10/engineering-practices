@@ -1,8 +1,8 @@
 name: Engineering practices quality check
 description: >-
-  Fails a pull request that adds dead code (knip, deadcode, ruff) or lint findings
-  (ESLint, staticcheck, ShellCheck) and posts a Quality report that informs review.
-  Configured by the caller's .github/quality.yml.
+  Fails a pull request that adds dead code (knip, deadcode, ruff), lint findings
+  (ESLint, staticcheck, ShellCheck) or a banned pattern (semgrep) and posts a Quality
+  report that informs review. Configured by the caller's .github/quality.yml.
 runs:
   using: composite
   steps:
