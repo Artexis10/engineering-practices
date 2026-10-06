@@ -44,6 +44,7 @@ mkdir -p "$out" "$tools"
 rd=$tools/reviewdog-$REVIEWDOG yq=$tools/yq-$YQ
 [ -s "$out/started" ] || date +%s > "$out/started" # the first run of the action starts the budget
 started=$(cat "$out/started")
+printf '%s\n' "$BUDGET" > "$out/budget" # report.py reads the budget from here
 
 # bounded <command...>: run under the smaller of TIMEOUT and what is left of the budget;
 # exit 124, like timeout, when it runs out or is already spent

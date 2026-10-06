@@ -40,11 +40,16 @@ SAMPLES, MINIMUM = 5, 3  # main runs in the runtime median; fewer than MINIMUM i
 
 env = os.environ.get
 OUT = Path(env("EP_OUT") or Path(os.environ["RUNNER_TEMP"]) / "engineering-practices" / "out")
-# The checks share one time budget from their first start; the report may run RESERVE seconds past it
-# to post, and the runtime measure stops POSTING seconds before that so posting keeps its time.
+# The checks share one time budget from their first start, both recorded by checks.sh; the report may
+# run RESERVE seconds past it to post, and the runtime measure stops POSTING seconds before that so
+# posting keeps its time. Without the record the budget is unknown and the report has no deadline.
 RESERVE, POSTING = 60, 20
-_started = OUT / "started"
-DEADLINE = int(_started.read_text()) + int(env("EP_BUDGET") or 600) + RESERVE if _started.exists() else None
+_started, _budget = OUT / "started", OUT / "budget"
+DEADLINE = (
+    int(_started.read_text()) + int(_budget.read_text()) + RESERVE
+    if _started.exists() and _budget.exists()
+    else None
+)
 
 
 class BudgetSpent(Exception):
@@ -245,6 +250,8 @@ def render():
     base = read("merge_base")
     head = git("rev-parse", "--short", "HEAD").stdout.strip()
     against = f"against base `{base[:7]}`" if base else "with no base"
+    unknown_budget = ["", "Time budget unknown: the checks recorded none, so the report ran without a deadline."]
+    unknown_budget = unknown_budget if DEADLINE is None else []
     return "\n".join(
         [
             MARKER,
@@ -254,6 +261,7 @@ def render():
                 f"`{head}` {against}. Only the dead-code gate fails this check; the rest informs review."
                 f" Why each check exists: [PRACTICES.md]({REGISTRY})."
             ),
+            *unknown_budget,
             "",
             f"### Dead-code gate: {verdict()}",
             "",
