@@ -91,12 +91,12 @@ as do excludes. A Python file that does not parse is reported on its added lines
 pinned ruff cannot load fails the gate on purpose, so keep it compatible with the version in
 `tools/requirements.txt`.
 
-**Time.** The action has one time budget, `EP_BUDGET` seconds (default 720), from the start of its first
+**Time.** The action has one time budget, `EP_BUDGET` seconds (default 600), from the start of its first
 step. Each download and each tool runs for at most 600 seconds or what is left of the budget, and a step
 that cannot start or finish within it reports "not run" and a warning. The report may run 60 seconds past
 the budget to post; a runtime measure or comment it cannot finish by then says "not run: time budget used
-up". So the action ends within 13 minutes of starting, inside the template's `timeout-minutes: 15` when
-checkout takes under two minutes.
+up". So the action ends within 11 minutes of starting, leaving room inside `timeout-minutes: 15` for job
+setup and steps before the action (for example setup-go).
 
 ## `.github/quality.yml`
 

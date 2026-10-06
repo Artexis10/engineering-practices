@@ -29,7 +29,7 @@ REVIEWDOG=0.21.2 REVIEWDOG_SHA256=30413aa3c7443e9c3c157fe5766cad40e3bb39a32e210e
 YQ=4.54.1 YQ_SHA256=8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
 DEADCODE=0.51.0 # golang.org/x/tools; go install checks it against the Go checksum database
 TIMEOUT=600     # seconds, per tool command
-BUDGET=${EP_BUDGET:-720} # seconds for the whole action, so it ends inside a caller's timeout-minutes: 15
+BUDGET=${EP_BUDGET:-600} # seconds for the whole action, so it ends inside a caller's timeout-minutes: 15
 
 mode=${1:-}
 case $mode in

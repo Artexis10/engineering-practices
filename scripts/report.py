@@ -44,7 +44,7 @@ OUT = Path(env("EP_OUT") or Path(os.environ["RUNNER_TEMP"]) / "engineering-pract
 # to post, and the runtime measure stops POSTING seconds before that so posting keeps its time.
 RESERVE, POSTING = 60, 20
 _started = OUT / "started"
-DEADLINE = int(_started.read_text()) + int(env("EP_BUDGET") or 720) + RESERVE if _started.exists() else None
+DEADLINE = int(_started.read_text()) + int(env("EP_BUDGET") or 600) + RESERVE if _started.exists() else None
 
 
 class BudgetSpent(Exception):
@@ -283,6 +283,7 @@ def publish(body):
     repo, number = env("GITHUB_REPOSITORY"), env("EP_PR_NUMBER")
     if not (env("GITHUB_TOKEN") and repo and number):
         return "Not posted as a pull request comment: no pull request context."
+    writing = False
     try:
         comments, page = [], 1
         while True:
@@ -295,6 +296,7 @@ def publish(body):
             (c for c in comments if MARKER in (c.get("body") or "") and (c.get("user") or {}).get("login") == AUTHOR),
             None,
         )
+        writing = True
         if mine:
             api(f"/repos/{repo}/issues/comments/{mine['id']}", "PATCH", {"body": body})
         else:
@@ -306,7 +308,9 @@ def publish(body):
             message = None
         detail = cell(f"{error.code} {message or error.reason}")
         return f"Not posted as a pull request comment: GitHub answered HTTP {detail}. This summary is the report."
-    except BudgetSpent:
+    except BudgetSpent as error:
+        if writing and error.__cause__ is not None:  # cut off mid-request, which may have reached GitHub
+            return "May not have been posted as a pull request comment: time budget used up. This summary is the report."
         return "Not posted as a pull request comment: time budget used up. This summary is the report."
     except Exception as error:  # noqa: BLE001 - a network or data surprise leaves the summary as the report
         return f"Not posted as a pull request comment: {error!r}. This summary is the report."
