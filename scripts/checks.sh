@@ -265,8 +265,8 @@ check_deadcode() {
     [ "$rc" != 124 ] || { say deadcode "not run: deadcode (GOOS=$goos) $(why "$rc" "$out/deadcode.err")"; return; }
     [ "$rc" = 0 ] || { say deadcode "failed: deadcode cannot load the packages (GOOS=$goos): $(why "$rc" "$out/deadcode.err")"; return; }
     # The files this GOOS builds, its packages' dependencies included ("built<TAB>GOOS<TAB>path"),
-    # then its findings ("dead<TAB>finding").
-    env -u PWD -C "$dir" GOOS="$goos" GOPROXY=off go list -deps -test -f \
+    # then its findings ("dead<TAB>finding"). -tags= matches deadcode, which overrides tags in GOFLAGS.
+    env -u PWD -C "$dir" GOOS="$goos" GOPROXY=off go list -deps -test -tags= -f \
       "{{range .GoFiles}}$each{{end}}{{range .CgoFiles}}$each{{end}}{{range .TestGoFiles}}$each{{end}}{{range .XTestGoFiles}}$each{{end}}" \
       ./... 2> "$out/deadcode.err" | awk -v goos="$goos" '{ print "built\t" goos "\t" $0 }' >> "$out/deadcode.runs" ||
       { rc=$?; say deadcode "failed: go list cannot load the packages (GOOS=$goos): $(why "$rc" "$out/deadcode.err")"; return; }
