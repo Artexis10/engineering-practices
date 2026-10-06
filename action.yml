@@ -19,12 +19,14 @@ runs:
       run: '"$GITHUB_ACTION_PATH/scripts/checks.sh" gate'
       env:
         EP_BASE: ${{ github.event.pull_request.base.sha }}
+        EP_HEAD: ${{ github.event.pull_request.head.sha }}
     - name: Review measures (never fail)
       if: ${{ !cancelled() && github.event_name != 'pull_request_target' }}
       shell: bash
       run: '"$GITHUB_ACTION_PATH/scripts/checks.sh" measures'
       env:
         EP_BASE: ${{ github.event.pull_request.base.sha }}
+        EP_HEAD: ${{ github.event.pull_request.head.sha }}
     - name: Quality report
       if: ${{ !cancelled() && github.event_name != 'pull_request_target' }}
       shell: bash

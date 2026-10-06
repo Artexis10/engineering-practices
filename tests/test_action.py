@@ -55,21 +55,51 @@ def left_pad(version):
     return {"web/package.json": json.dumps(package, indent=2), "web/package-lock.json": json.dumps(lock, indent=2)}
 
 
+def git(path, *args):
+    identity = ["-c", "user.name=fixture", "-c", "user.email=fixture@example.com"]
+    return subprocess.run(["git", "-C", str(path), *identity, *args], check=True, capture_output=True, text=True).stdout
+
+
+def commit(path, files):
+    """Write `files` into the repository and commit them; returns the commit."""
+    for name, text in files.items():
+        (path / name).parent.mkdir(parents=True, exist_ok=True)
+        (path / name).write_text(text)
+    git(path, "add", "-A")
+    git(path, "commit", "-q", "-m", "change")
+    return git(path, "rev-parse", "HEAD").strip()
+
+
 def repository(base, head):
     """A git repository whose HEAD~1 holds `base` and HEAD adds `head`; returns (path, base commit)."""
     path = Path(tempfile.mkdtemp(prefix="ep-fixture-"))
+    git(path, "init", "-q", "-b", "main")
+    base_commit = commit(path, base)
+    commit(path, head)
+    return path, base_commit
 
-    def git(*args):
-        return subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True, text=True).stdout
 
-    git("init", "-q", "-b", "main")
-    for files in (base, head):
-        for name, text in files.items():
-            (path / name).parent.mkdir(parents=True, exist_ok=True)
-            (path / name).write_text(text)
-        git("add", "-A")
-        git("-c", "user.name=fixture", "-c", "user.email=fixture@example.com", "commit", "-q", "-m", "change")
-    return path, git("rev-parse", "HEAD~1").strip()
+def merge_ref(base, branch, main_later):
+    """A pull request's merge ref after main moved on: returns (path, event base, pull request head).
+
+    main holds `base`; the pull request branches off it and adds `branch`; main then gains
+    `main_later`; HEAD merges the pull request into main as it is now, as actions/checkout does.
+    """
+    path = Path(tempfile.mkdtemp(prefix="ep-fixture-"))
+    git(path, "init", "-q", "-b", "main")
+    event_base = commit(path, base)
+    git(path, "checkout", "-q", "-b", "pr")
+    head = commit(path, branch)
+    git(path, "checkout", "-q", "main")
+    commit(path, main_later)
+    git(path, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+    return path, event_base, head
+
+
+def row(markdown, name):
+    """The cells of a report table's row for `name`."""
+    line = next(line for line in markdown.splitlines() if line.startswith(f"| {name} |"))
+    return [cell.strip() for cell in line.strip("|").split("|")]
 
 
 def run(path, base, *command, **env):
@@ -87,8 +117,8 @@ def run(path, base, *command, **env):
 
 
 def gate(base, head, **env):
-    path, commit = repository(base, head)
-    proc, out = run(path, commit, str(SCRIPTS / "checks.sh"), "gate", **env)
+    path, base_commit = repository(base, head)
+    proc, out = run(path, base_commit, str(SCRIPTS / "checks.sh"), "gate", **env)
     return proc.returncode, out
 
 
@@ -180,22 +210,33 @@ class Gate(unittest.TestCase):
         self.assertRegex(status, r"^not run: npm ci exit \d+: \S")
 
 
+class Base(unittest.TestCase):
+    def test_base_branch_commits_after_the_pull_request_opened_are_not_its_lines(self):
+        base = {**JS, ".github/quality.yml": JS[".github/quality.yml"] + "classes:\n  product: ['web/src/*']\n"}
+        main_later = {
+            "web/src/util.ts": UTIL + "\nexport function mainDead() {\n  return 4;\n}\n",
+            "web/src/more.ts": "1\n2\n",
+        }
+        branch = {"web/src/index.ts": JS["web/src/index.ts"] + 'console.log("pull request");\n'}
+        path, event_base, head = merge_ref(base, branch, main_later)
+        proc, out = run(path, event_base, str(SCRIPTS / "checks.sh"), "gate", EP_HEAD=head)
+        report, _ = run(path, event_base, "python3", str(SCRIPTS / "report.py"), EP_OUT=str(out))
+        self.assertIn("mainDead", (out / "knip.sarif").read_text())  # knip reports main's new dead code on HEAD
+        self.assertEqual((proc.returncode, result(out, "knip")[0]), (0, "passed"))
+        self.assertEqual(row(report.stdout, "product"), ["product", "1", "1", "0"])  # only the pull request's line
+
+
 class Report(unittest.TestCase):
     def test_reports_proof_weight_per_class(self):
         config = "classes:\n  tests: ['tests/*']\n  product: ['src/*']\n"
         base = {".github/quality.yml": config, "src/app.py": "x = 1\n"}
         head = {"src/app.py": "x = 2\ny = 3\n", "tests/test_app.py": "a\nb\nc\n", "notes.txt": "n\n"}
-        path, commit = repository(base, head)
-        _, out = run(path, commit, str(SCRIPTS / "checks.sh"), "gate")
-        proc, _ = run(path, commit, "python3", str(SCRIPTS / "report.py"), EP_OUT=str(out))
-
-        def row(name):
-            line = next(line for line in proc.stdout.splitlines() if line.startswith(f"| {name} |"))
-            return [cell.strip() for cell in line.strip("|").split("|")]
-
-        self.assertEqual(row("product"), ["product", "1", "2", "1"])
-        self.assertEqual(row("tests"), ["tests", "1", "3", "0"])
-        self.assertEqual(row("unclassified"), ["unclassified", "1", "1", "0"])
+        path, base_commit = repository(base, head)
+        _, out = run(path, base_commit, str(SCRIPTS / "checks.sh"), "gate")
+        proc, _ = run(path, base_commit, "python3", str(SCRIPTS / "report.py"), EP_OUT=str(out))
+        self.assertEqual(row(proc.stdout, "product"), ["product", "1", "2", "1"])
+        self.assertEqual(row(proc.stdout, "tests"), ["tests", "1", "3", "0"])
+        self.assertEqual(row(proc.stdout, "unclassified"), ["unclassified", "1", "1", "0"])
         self.assertIn("Product +2 lines against proof +3 lines (tests)", proc.stdout)
 
 

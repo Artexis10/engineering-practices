@@ -67,7 +67,10 @@ which would hand that code a write token and the repository's secrets. That code
 `$GITHUB_ENV` and `$GITHUB_PATH` and so reach the report step, which holds the job's token; this matters
 for Dependabot runs, which get the permissions the job declares.
 
-**What counts as added.** A finding fails the gate only on a line the pull request adds. An unused file
+**What counts as added.** A finding fails the gate only on a line the pull request adds, measured against
+the base branch as it is now: on the merge ref that `actions/checkout` checks out, that is HEAD's first
+parent, so commits that land on the base branch after the pull request opened are not counted as its
+lines. On any other checkout it is the merge base with the event's base commit. An unused file
 counts only when the pull request adds the file, and an unused dependency only when the merge base did
 not declare it, so editing an old unused file or bumping an old unused dependency passes. Editing the
 declaration line of an export that was already unused still fails, because that line counts as added:
