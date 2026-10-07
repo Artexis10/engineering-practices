@@ -14,9 +14,9 @@ machine can check.
      [ESLint](https://eslint.org) with its config and plugins, [staticcheck](https://staticcheck.dev)
      for Go, and [ShellCheck](https://www.shellcheck.net) for the shell scripts the pull request
      changes. A banned pattern (practice C6), found by [semgrep](https://semgrep.dev) with
-     `rules/banned-patterns.yml` and the repository's own rules: a word list or word regex that decides
-     what a person meant, a regex over SQL, HTML or XML, and, listed for the reviewer without failing, a
-     domain vocabulary fixed in code. Only lines the pull request adds count
+     `rules/banned-patterns.yml` and the repository's own rules: a set, search or membership test of three
+     or more words, whatever the code names them; a word list or word regex over a value named for a
+     person's text; and a regex over SQL, HTML or XML. Only lines the pull request adds count
      ([reviewdog](https://github.com/reviewdog/reviewdog) filters the rest), so an existing finding fails
      a pull request only when it edits that line (see "What counts as added" below). The gate also fails
      when input the repository owns is broken: `.github/quality.yml` does not parse, `npm ci` rejects the
@@ -119,13 +119,41 @@ findings in it are dropped.
 
 **Banned patterns.** semgrep reads the files the pull request changes under `semgrep.paths` (each rule
 reads one file at a time, so no other file can change a finding) and reviewdog keeps the findings on
-added lines. A rule of severity ERROR fails the gate; WARNING and INFO findings are listed in the report
-for the reviewer. Each rule's message says what the pattern usually is, the sound shapes, and when to keep
-it: a line that checks a field's format, or reads a closed machine format, may keep a finding with
-`# nosemgrep: <rule-id> -- <reason>`, which review checks. A repository adds its own stricter bans as
-semgrep rule files under `semgrep.rules`, with the same severities. semgrep runs as one job with 120
-seconds per rule and file; a file it gives up on, in whole or in one long function, makes the result
-"partial" and names the file.
+added lines. A finding that spans several lines counts when the pull request adds any of them, so adding
+one word to an old word set fails. A rule of severity ERROR fails the gate; WARNING and INFO findings are
+listed in the report for the reviewer. Each rule's message says what the pattern usually is, the sound
+shapes, and when to keep it: a line that checks a field's format, or reads a closed set that a schema,
+protocol or provider fixes, may keep a finding with `# nosemgrep: <rule-id> -- <reason>`, which review
+checks. An added `nosemgrep` comment without a rule and a reason fails the gate, because a bare one hides
+every finding on its line. A repository adds its own stricter bans as semgrep rule files under
+`semgrep.rules`, with the same severities. semgrep runs as one job with 120 seconds per rule and file; a
+file it gives up on, in whole or in one long function, makes the result "partial" and names the file.
+
+The rules for words (practice C6) look at the shape of the code, not at its names:
+
+- `ep-word-set`: a name bound to a set, list, tuple or frozenset of three or more words, or to a string
+  of words split into a list. A word is lowercase letters with an inner space, apostrophe or hyphen. A
+  list that also holds a key, code or path (an `_`, `/`, digit or capital) is not reported, nor is a dict.
+- `ep-word-search`: a regex that alternates three or more words (not after `\.`, which lists file
+  extensions), and a comprehension or `any(...)` that tests each of three or more words against a value.
+- `ep-word-membership`: a value tested with `in` against three or more words, or a value folded (for
+  example lowercased) and looked up among a constant's values folded the same way.
+- `ep-lexical-intent`: one or two words, a word constant or a word regex, used on a value named for a
+  person's text (`text`, `question`, `reply` and the like).
+
+They fire on a program's own closed sets too, such as a grammar's operators or a provider's enum, which
+keep their line with a reason.
+
+**Audit.** The gate reads only added lines, so an old instance stays until a pull request edits its line.
+`checks.sh audit` lists them all: it runs the same semgrep rules over every tracked file under
+`semgrep.paths`, needs no base commit, and never fails. Run it from the repository's root:
+
+```sh
+EP_OUT=/tmp/ep-audit EP_TOOLS=/tmp/ep-tools <engineering-practices>/scripts/checks.sh audit
+```
+
+It writes `$EP_OUT/semgrep.audit`, one `path:line: rule-id` per finding, and prints the count per rule. A
+tool that cannot be installed or run shows "not run", as in the gate.
 
 **Time.** The action has one time budget, `EP_BUDGET` seconds (default 600), from the start of its first
 step. Each download and each tool runs for at most 600 seconds or what is left of the budget, and a step

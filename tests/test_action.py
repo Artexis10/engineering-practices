@@ -399,6 +399,51 @@ class Gate(unittest.TestCase):
         code, out = gate(SEMGREP, {"src/forms.py": checks})
         self.assertEqual((code, result(out, "semgrep")), (0, ("passed", "")))
 
+    def test_added_word_checks_fail_whatever_their_names(self):
+        # No name says "words" or "text", and the last check's words live in another file.
+        checks = (
+            "import re\n"
+            "from src.labels import KINDS\n\n"
+            'PARTS = ("um", "uh", "er")\n'
+            'ASIDE = re.compile(r"\\b(?:btw|fyi|ps)\\b")\n\n\n'
+            "def kind(value):\n"
+            '    if value in ("yes", "yeah", "sure"):\n'
+            '        return "agree"\n'
+            "    folded = {known.lower() for known in KINDS}\n"
+            "    return value.lower() in folded\n"
+        )
+        code, out = gate(SEMGREP, {"src/kind.py": checks})
+        status, findings = result(out, "semgrep")
+        self.assertEqual(code, 1, status)
+        self.assertEqual(
+            sorted(":".join(line.split(":")[:3]) for line in findings.splitlines()),
+            [
+                "src/kind.py:12: ep-word-membership",
+                "src/kind.py:4: ep-word-set",
+                "src/kind.py:5: ep-word-search",
+                "src/kind.py:9: ep-word-membership",
+            ],
+        )
+
+    def test_word_added_to_an_old_multiline_word_set_fails(self):
+        # The finding spans the literal and starts on its first line, which the pull request leaves alone.
+        old = 'FILLER = {\n    "um",\n    "uh",\n    "er",\n}\n'
+        code, out = gate({**SEMGREP, "src/words.py": old}, {"src/words.py": old.replace('"er",\n', '"er",\n    "like",\n')})
+        status, findings = result(out, "semgrep")
+        self.assertEqual(code, 1, status)
+        self.assertIn("src/words.py:1: ep-word-set:", findings)
+
+    def test_nosemgrep_without_a_rule_and_a_reason_fails(self):
+        # The first line keeps its finding the documented way; the bare comment would hide any finding.
+        kept = (
+            'STATES = ("queued", "running", "done")  # nosemgrep: ep-word-set -- the job runner documents these\n'
+            'AGREE = ("yes", "yeah", "sure")  # nosemgrep\n'
+        )
+        code, out = gate(SEMGREP, {"src/states.py": kept})
+        status, findings = result(out, "semgrep")
+        self.assertEqual(code, 1, status)
+        self.assertEqual([":".join(line.split(":")[:3]) for line in findings.splitlines()], ["src/states.py:2: ep-nosemgrep-form"])
+
     def test_go_module_download_failure_is_neutral(self):
         # A required module whose host cannot resolve, fetched directly rather than through the proxy.
         head = {"go.mod": GO["go.mod"] + "\nrequire example.invalid/dep v1.0.0\n"}
@@ -438,6 +483,16 @@ class Base(unittest.TestCase):
 
     def test_on_a_head_whose_branch_merged_main(self):
         self.check_only_the_pull_requests_line_counts(merge_ref=False)
+
+
+class Audit(unittest.TestCase):
+    def test_lists_an_old_word_set_in_a_file_the_gate_does_not_read(self):
+        path, base = repository({**SEMGREP, "src/words.py": 'FILLER = ("um", "uh", "er")\n'}, {"src/app.py": "x = 1\n"})
+        gated, out = run(path, base, str(SCRIPTS / "checks.sh"), "gate")
+        self.assertEqual((gated.returncode, result(out, "semgrep")[0]), (0, "passed"))
+        audited, out = run(path, "", str(SCRIPTS / "checks.sh"), "audit")  # no base commit
+        self.assertEqual(audited.returncode, 0, audited.stdout)
+        self.assertEqual((out / "semgrep.audit").read_text(), "src/words.py:1: ep-word-set\n")
 
 
 class Report(unittest.TestCase):

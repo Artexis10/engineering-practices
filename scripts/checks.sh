@@ -10,6 +10,10 @@
 #                        finding on a line the diff adds, or reports that the
 #                        repository's own input is broken
 #   checks.sh measures   jscpd and vulture; never fails
+#   checks.sh audit      semgrep's banned patterns over every file under semgrep.paths,
+#                        with no base commit: writes $EP_OUT/semgrep.audit, one
+#                        "path:line: rule-id" per finding, and prints the count per rule;
+#                        never fails
 #
 # Each check writes $EP_OUT/<check>.status ("passed", "failed: ...",
 # "N on added lines", "not configured" or "not run: <reason>") and
@@ -46,7 +50,8 @@ case $mode in
   # Cheapest first, so a slow npm install or Go build cannot leave the quick checks without budget.
   gate) checks=(ruff shellcheck knip eslint semgrep deadcode staticcheck) ;;
   measures) checks=(jscpd vulture) ;;
-  *) echo "usage: checks.sh gate|measures" >&2; exit 2 ;;
+  audit) checks=(semgrep) ;;
+  *) echo "usage: checks.sh gate|measures|audit" >&2; exit 2 ;;
 esac
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 out=${EP_OUT:-${RUNNER_TEMP:?}/engineering-practices/out}
@@ -111,6 +116,7 @@ setup() {
   [ -f .github/quality.yml ] || { echo "the repository has no .github/quality.yml"; return 1; }
   "$yq" -o=json . .github/quality.yml > "$out/config.json" 2> "$err" ||
     { rc=$?; echo ".github/quality.yml does not parse: $(why "$rc" "$err")"; return 2; }
+  [ "$mode" != audit ] || return 0 # the audit reads the whole tree, not a diff
   [ -n "${EP_BASE:-}" ] || { echo "no pull request base commit; the action runs on pull_request events"; return 1; }
   # On the pull request's merge ref (what actions/checkout checks out), HEAD merges the head into the base
   # branch as it is now, while the event's base commit can be older; diffing against it would count the
@@ -505,12 +511,15 @@ check_semgrep() {
     [ -e "$path" ] || { say semgrep "failed: semgrep in .github/quality.yml names $path, which does not exist"; return; }
   done
   for path in "${rules[@]}"; do configs+=(--config "$path"); done
-  # Every rule reads one file at a time, so only the files the pull request changes need reading.
-  mapfile -d '' -t targets < <(git diff --text -z --name-only --diff-filter=d "$mb" HEAD -- "${paths[@]}")
+  if [ "$mode" = audit ]; then
+    mapfile -d '' -t targets < <(git ls-files -z -- "${paths[@]}")
+  else # every rule reads one file at a time, so only the files the pull request changes need reading
+    mapfile -d '' -t targets < <(git diff --text -z --name-only --diff-filter=d "$mb" HEAD -- "${paths[@]}")
+  fi
   # With no code changed, a changed rule file still loads, against an empty file, so a broken one
-  # fails the pull request that broke it.
+  # fails the pull request that broke it. The audit always loads them.
   if [ "${#targets[@]}" = 0 ]; then
-    [ "${#rules[@]}" -gt 0 ] && [ -n "$(git diff --text --name-only "$mb" HEAD -- "${rules[@]}")" ] ||
+    [ "$mode" = audit ] || { [ "${#rules[@]}" -gt 0 ] && [ -n "$(git diff --text --name-only "$mb" HEAD -- "${rules[@]}")" ]; } ||
       { say semgrep passed; return; }
     : > "$out/empty.py"
     targets=("$out/empty.py")
@@ -529,8 +538,24 @@ check_semgrep() {
     return
   fi
   [ "$rc" = 0 ] || { say semgrep "not run: semgrep $(why "$rc" "$out/semgrep.err")"; return; }
-  # An ERROR finding fails on an added line; a WARNING is listed for the reviewer. A nosemgrep comment keeps one out.
-  filter semgrep . error -f=sarif < "$out/semgrep.sarif"
+  if [ "$mode" = audit ]; then
+    jq -r '.results[] | "\(.path):\(.start.line): \(.check_id | split(".") | last)"' "$out/semgrep.json" > "$out/semgrep.audit"
+    say semgrep "$(wc -l < "$out/semgrep.audit") in the tree"
+    awk -F ': ' '{ print $NF }' "$out/semgrep.audit" | sort | uniq -c | sort -rn
+  else
+    # A nosemgrep comment that names no rule hides every finding on its line, and one with no reason
+    # gives review nothing to check: an added one fails like a finding. A semgrep rule cannot find it,
+    # because the comment hides that rule's finding too.
+    for path in "${targets[@]}"; do
+      grep -n --text nosemgrep -- "$path" | grep -Ev 'nosemgrep: [A-Za-z0-9._-]+(, ?[A-Za-z0-9._-]+)* -- [^[:space:]]' |
+        cut -d: -f1 | jq -c --arg path "$path" '{ruleId: "ep-nosemgrep-form", level: "error",
+          message: {text: "ep-nosemgrep-form: a nosemgrep comment names no rule or gives no reason. Write `# nosemgrep: <rule-id> -- <reason>`, which review checks."},
+          locations: [{physicalLocation: {artifactLocation: {uri: $path}, region: {startLine: .}}}]}'
+    done > "$out/nosemgrep.json"
+    # An ERROR finding fails on an added line; a WARNING is listed for the reviewer. A nosemgrep comment keeps one out.
+    jq --slurpfile form "$out/nosemgrep.json" '.runs[0].results += $form' "$out/semgrep.sarif" > "$out/semgrep.gate.sarif"
+    filter semgrep . error -f=sarif < "$out/semgrep.gate.sarif"
+  fi
   gaveup=$(jq -r '(.errors[]? | select(.type == "Timeout") | .path // empty),
       (.time.fixpoint_timeouts[]?.message | capture("analysis at (?<path>[^:]+):").path)' "$out/semgrep.json" |
     sort -u | paste -sd, - | sed 's/,/, /g')
@@ -543,7 +568,7 @@ reason=$(setup)
 case $? in
   0)
     rm -f "$out/setup.reason"
-    mb=$(cat "$out/merge_base")
+    [ "$mode" = audit ] || mb=$(cat "$out/merge_base")
     for check in "${checks[@]}"; do "check_$check"; done
     ;;
   2) # the repository's own config is broken: the gate fails, the measures do not run
