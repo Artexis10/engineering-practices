@@ -27,7 +27,7 @@ GATE = [
     ("eslint", "Lint errors (the repository's ESLint and config)"),
     ("staticcheck", "Go bugs, simplifications and style (staticcheck)"),
     ("shellcheck", "Shell script bugs (ShellCheck)"),
-    ("semgrep", "Banned patterns: word lists over a person's text, regex over SQL or markup (semgrep)"),
+    ("semgrep", "Banned patterns: word lists and word regexes, regex over SQL or markup (semgrep)"),
 ]
 MEASURES = [
     ("jscpd", "New duplicate code, exact token clones (jscpd)"),
