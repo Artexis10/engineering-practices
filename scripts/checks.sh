@@ -551,11 +551,12 @@ check_semgrep() {
     # it, because the comment hides that rule's finding too.
     mapfile -d '' -t scanned < <(jq -j '.paths.scanned[]? + "\u0000"' "$out/semgrep.json")
     for path in "${scanned[@]}"; do
-      jq -Rc --arg path "$path" 'select(test(" nosem(grep)?"; "i")
-          and (sub(" nosemgrep: [A-Za-z0-9._-]+(, ?[A-Za-z0-9._-]+)* -- \\S.*$"; "") | test(" nosem(grep)?"; "i")))
+      # grep numbers the lines: jq's input_line_number misses a last line without a newline.
+      grep -n --text -i -E ' nosem(grep)?' -- "$path" | jq -Rc --arg path "$path" 'capture("^(?<n>[0-9]+):(?<text>.*)$")
+        | select(.text | sub(" nosemgrep: [A-Za-z0-9._-]+(, ?[A-Za-z0-9._-]+)* -- \\S.*$"; "") | test(" nosem(grep)?"; "i"))
         | {ruleId: "ep-nosemgrep-form", level: "error",
            message: {text: "ep-nosemgrep-form: a nosemgrep comment names no rule or gives no reason. Write `# nosemgrep: <rule-id> -- <reason>`, which review checks."},
-           locations: [{physicalLocation: {artifactLocation: {uri: $path}, region: {startLine: input_line_number}}}]}' "$path"
+           locations: [{physicalLocation: {artifactLocation: {uri: $path}, region: {startLine: (.n | tonumber)}}}]}'
     done > "$out/nosemgrep.json"
     # An ERROR finding fails on an added line; a WARNING is listed for the reviewer. A nosemgrep comment keeps one out.
     jq --slurpfile form "$out/nosemgrep.json" '.runs[0].results += $form' "$out/semgrep.sarif" > "$out/semgrep.gate.sarif"

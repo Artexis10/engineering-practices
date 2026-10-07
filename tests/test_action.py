@@ -445,12 +445,14 @@ class Gate(unittest.TestCase):
         lines += [f'AGREE = ("yes", "yeah", "sure"){comment}' for comment in hiding]
         lines += ["# nosem", 'AGREE = ("yes", "yeah", "sure")']
         head = {"src/states.py": "\n".join(lines) + "\n", "src/NOTES.md": "Keep a closed set with `# nosemgrep`.\n"}
+        head["src/last.py"] = 'AGREE = ("yes", "yeah", "sure")  # nosem'  # a last line without a newline
         code, out = gate(SEMGREP, head)
         status, findings = result(out, "semgrep")
         self.assertEqual(code, 1, status)
         self.assertEqual(
-            [":".join(line.split(":")[:3]) for line in findings.splitlines()],
-            [f"src/states.py:{number}: ep-nosemgrep-form" for number in range(2, len(hiding) + 3)],
+            sorted(":".join(line.split(":")[:3]) for line in findings.splitlines()),
+            sorted(["src/last.py:1: ep-nosemgrep-form"]
+                   + [f"src/states.py:{number}: ep-nosemgrep-form" for number in range(2, len(hiding) + 3)]),
         )
 
     def test_go_module_download_failure_is_neutral(self):
