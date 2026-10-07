@@ -394,7 +394,10 @@ class Gate(unittest.TestCase):
             "def is_attachment(text):\n"
             '    return bool(re.search(r"\\.(pdf|docx|xlsx)$", text.lower()))\n\n\n'
             "def is_country(text):\n"
-            "    return text.strip().upper() in COUNTRY_CODES\n"
+            "    return text.strip().upper() in COUNTRY_CODES\n\n\n"
+            "def is_country_any_case(text):\n"
+            "    codes = {code.upper() for code in COUNTRY_CODES}\n"
+            "    return text.strip().upper() in codes\n"
         )
         code, out = gate(SEMGREP, {"src/forms.py": checks})
         self.assertEqual((code, result(out, "semgrep")), (0, ("passed", "")))
@@ -434,15 +437,21 @@ class Gate(unittest.TestCase):
         self.assertIn("src/words.py:1: ep-word-set:", findings)
 
     def test_nosemgrep_without_a_rule_and_a_reason_fails(self):
-        # The first line keeps its finding the documented way; the bare comment would hide any finding.
-        kept = (
-            'STATES = ("queued", "running", "done")  # nosemgrep: ep-word-set -- the job runner documents these\n'
-            'AGREE = ("yes", "yeah", "sure")  # nosemgrep\n'
-        )
-        code, out = gate(SEMGREP, {"src/states.py": kept})
+        # semgrep honours " nosem" and " nosemgrep" in any case, on the line or alone on the line above; each
+        # form below hides the word set's finding. Only the documented form passes, and a Markdown file
+        # that semgrep does not scan is not read.
+        hiding = ["  # nosemgrep", "  # nosem", "  # NOSEMGREP", "  # NoSem", "  # Nosemgrep", "  # nosem: ep-word-set"]
+        lines = ['STATES = ("queued", "running", "done")  # nosemgrep: ep-word-set -- the job runner documents these']
+        lines += [f'AGREE = ("yes", "yeah", "sure"){comment}' for comment in hiding]
+        lines += ["# nosem", 'AGREE = ("yes", "yeah", "sure")']
+        head = {"src/states.py": "\n".join(lines) + "\n", "src/NOTES.md": "Keep a closed set with `# nosemgrep`.\n"}
+        code, out = gate(SEMGREP, head)
         status, findings = result(out, "semgrep")
         self.assertEqual(code, 1, status)
-        self.assertEqual([":".join(line.split(":")[:3]) for line in findings.splitlines()], ["src/states.py:2: ep-nosemgrep-form"])
+        self.assertEqual(
+            [":".join(line.split(":")[:3]) for line in findings.splitlines()],
+            [f"src/states.py:{number}: ep-nosemgrep-form" for number in range(2, len(hiding) + 3)],
+        )
 
     def test_go_module_download_failure_is_neutral(self):
         # A required module whose host cannot resolve, fetched directly rather than through the proxy.

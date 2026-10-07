@@ -21,8 +21,9 @@ x-shapes:
   # codes or paths. A dict is left out: most map a program's own keys to labels.
   words: &words (?s)^(?=((frozenset|set|tuple|list)\((\s|#[^\n]*)*)?[\[({](\s|#[^\n]*)*(("[^"\\_/0-9A-Z\n]*"|'[^'\\_/0-9A-Z\n]*')(\s|#[^\n]*)*,(\s|#[^\n]*)*)*("[^"\\_/0-9A-Z\n]*"|'[^'\\_/0-9A-Z\n]*')(\s|#[^\n]*)*,?(\s|#[^\n]*)*[\])}](\s|#[^\n]*)*\)?$)(.*?[\[({,](\s|#[^\n]*)*("[a-z]+([ '-][a-z]+)*"|'[a-z]+([ -][a-z]+)*')(?=(\s|#[^\n]*)*[,\])}])){3}|^((frozenset|set|tuple|list)\()?("""|"|')\s*[a-z]+(['-][a-z]+)*(\s+[a-z]+(['-][a-z]+)*){2,}\s*("""|"|')\.split\(("[ ]"|'[ ]')?\)\)?$
   # A regex that alternates three or more words, with \b, \s and ? allowed in a word. An
-  # alternation after \. lists file extensions.
-  word-alternation: &word-alternation (?s).*((?<!\\\.)\((\?:|\?P<\w+>)?|\(\?[aiLmsux]+\)|["']\^?)((\\b)?[a-z]+\??(([ '-]|\\s[+*?]?)[a-z]+\??)*(\\b)?\|){2,}(\\b)?[a-z]+\??(([ '-]|\\s[+*?]?)[a-z]+\??)*(\\b)?(?=[|)"'])
+  # alternation after \. lists file extensions. It reads the pattern as source (with its quotes) and,
+  # inside metavariable-pattern, as the string's content (without them), so its start and end count too.
+  word-alternation: &word-alternation (?s).*((?<!\\\.)\((\?:|\?P<\w+>)?|\(\?[aiLmsux]+\)|["']\^?|^\^?)((\\b)?[a-z]+\??(([ '-]|\\s[+*?]?)[a-z]+\??)*(\\b)?\|){2,}(\\b)?[a-z]+\??(([ '-]|\\s[+*?]?)[a-z]+\??)*(\\b)?(?=[|)"']|$)
   # A regex that reads SQL: a SQL keyword, or a word SQL shares with prose beside an identifier class.
   sql: &sql (?is).*((select|where|join|having|coalesce|union|returning|ilike|distinct|intersect|insert|truncate|(group|order)\\s[*+]?by)(\\b|\\s)|(\\b|\\s[*+?]?|[^a-z\\])(as|on|from|into|values|limit|offset|over)(\\s|\\b).*\[a-z_\]|\[a-z_\].*(\\b|\\s[*+?]?|[^a-z\\])(as|on|from|into|values|limit|offset|over)(\\s|\\b))
   # A regex that reads markup: a tag (<a, </, <!--, <\w), a tag body ([^>]), an attribute (href=),
@@ -284,7 +285,8 @@ rules:
         THANKS = re.compile(r"\b(?:thanks|thank you|cheers)\b", re.I)
         if any(word in value for word in ("urgent", "asap", "today")): ...
     pattern-either:
-      # A regex that alternates words, unless ep-regex-over-sql or ep-regex-over-markup reports it.
+      # A regex that alternates words, unless its pattern reads SQL or markup. A word regex run over a
+      # value named for SQL is reported by ep-regex-over-sql too.
       - patterns:
           - pattern: re.$FN($PAT, ...)
           - metavariable-regex:
@@ -354,7 +356,8 @@ rules:
       # A value folded (case, accents, spaces) and looked up among a constant's values folded the
       # same way: the fold says the two are compared as written words, and the constant's words
       # often live in another file. A constant is named in capitals (PEP 8); a set folded from
-      # data is a lookup, not a vocabulary.
+      # data is a lookup, not a vocabulary. A type conversion (str, int) is not a fold, and codes
+      # are folded to capitals, so neither is reported.
       - patterns:
           - pattern-either:
               - patterns:
@@ -368,6 +371,9 @@ rules:
                   - pattern-either:
                       - pattern: $F($X) in $S
                       - pattern: $F($X) not in $S
+                  - metavariable-regex:
+                      metavariable: $F
+                      regex: ^(?!(str|int|float|bytes)$)
               - patterns:
                   - pattern-either:
                       - pattern-inside: |
@@ -379,6 +385,10 @@ rules:
                   - pattern-either:
                       - pattern: $X.$M() in $S
                       - pattern: $X.$M() not in $S
+                  # The str methods that fold case or whitespace.
+                  - metavariable-regex:
+                      metavariable: $M
+                      regex: ^(lower|casefold|strip|lstrip|rstrip)$
           - metavariable-regex:
               metavariable: $C
               regex: ^_?[A-Z][A-Z0-9_]*$

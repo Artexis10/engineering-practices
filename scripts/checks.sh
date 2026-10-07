@@ -503,7 +503,7 @@ check_vulture() {
 }
 
 check_semgrep() {
-  local rc path paths=() rules=() targets=() configs=(--config "$here/rules/banned-patterns.yml") gaveup
+  local rc path paths=() rules=() targets=() scanned=() configs=(--config "$here/rules/banned-patterns.yml") gaveup
   enabled semgrep || { say semgrep "not configured"; return; }
   mapfile -t paths < <(cfg '.semgrep.paths // ["."] | .[]')
   mapfile -t rules < <(cfg '.semgrep.rules // [] | .[]')
@@ -543,14 +543,19 @@ check_semgrep() {
     say semgrep "$(wc -l < "$out/semgrep.audit") in the tree"
     awk -F ': ' '{ print $NF }' "$out/semgrep.audit" | sort | uniq -c | sort -rn
   else
-    # A nosemgrep comment that names no rule hides every finding on its line, and one with no reason
-    # gives review nothing to check: an added one fails like a finding. A semgrep rule cannot find it,
-    # because the comment hides that rule's finding too.
-    for path in "${targets[@]}"; do
-      grep -n --text nosemgrep -- "$path" | grep -Ev 'nosemgrep: [A-Za-z0-9._-]+(, ?[A-Za-z0-9._-]+)* -- [^[:space:]]' |
-        cut -d: -f1 | jq -c --arg path "$path" '{ruleId: "ep-nosemgrep-form", level: "error",
-          message: {text: "ep-nosemgrep-form: a nosemgrep comment names no rule or gives no reason. Write `# nosemgrep: <rule-id> -- <reason>`, which review checks."},
-          locations: [{physicalLocation: {artifactLocation: {uri: $path}, region: {startLine: .}}}]}'
+    # semgrep honours " nosem" or " nosemgrep" in any case, on the finding's line or alone on the line
+    # above (semgrep 1.179, semgrep/constants.py: NOSEM_INLINE_RE and NOSEM_PREVIOUS_LINE_RE). One that
+    # names no rule hides every finding there, and one with no reason gives review nothing to check, so
+    # an added line in a scanned file that carries the token in any other form than
+    # `nosemgrep: <rule-id>[, <rule-id>...] -- <reason>` fails like a finding. A semgrep rule cannot find
+    # it, because the comment hides that rule's finding too.
+    mapfile -d '' -t scanned < <(jq -j '.paths.scanned[]? + "\u0000"' "$out/semgrep.json")
+    for path in "${scanned[@]}"; do
+      jq -Rc --arg path "$path" 'select(test(" nosem(grep)?"; "i")
+          and (sub(" nosemgrep: [A-Za-z0-9._-]+(, ?[A-Za-z0-9._-]+)* -- \\S.*$"; "") | test(" nosem(grep)?"; "i")))
+        | {ruleId: "ep-nosemgrep-form", level: "error",
+           message: {text: "ep-nosemgrep-form: a nosemgrep comment names no rule or gives no reason. Write `# nosemgrep: <rule-id> -- <reason>`, which review checks."},
+           locations: [{physicalLocation: {artifactLocation: {uri: $path}, region: {startLine: input_line_number}}}]}' "$path"
     done > "$out/nosemgrep.json"
     # An ERROR finding fails on an added line; a WARNING is listed for the reviewer. A nosemgrep comment keeps one out.
     jq --slurpfile form "$out/nosemgrep.json" '.runs[0].results += $form' "$out/semgrep.sarif" > "$out/semgrep.gate.sarif"

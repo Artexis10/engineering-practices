@@ -73,9 +73,10 @@ These practices have no automated enforcer; they rely on the author and the inde
   file; the monthly gardener sweeps that. For Python the gate covers ruff's F rules only; unreferenced
   definitions are the vulture measure, which a reviewer judges.
 - **Partly covered:** C4 is gated only for the patterns C6 names. C6 reads Python only. Its word rules miss
-  a vocabulary held in a dict, words inside a prompt string, and a word list that also holds a key, code,
-  digit or capital; one or two words are found only in a value named for a person's text. Review covers
-  the rest.
+  words held in a dict, a default argument or a prompt string; a chain such as `x == "a" or x == "b"`; a
+  verbose-mode or capitalised regex, or one built with `"|".join(...)`; a `for` statement over words; and
+  a word list that also holds a key, code, digit or capital. One or two words are found only in a value
+  named for a person's text. Review covers the rest.
 
 An automated enforcer for a gap is welcome when it passes K1: what it prevents must outweigh what its
 wrong fires cost.

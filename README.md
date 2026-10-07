@@ -124,10 +124,12 @@ one word to an old word set fails. A rule of severity ERROR fails the gate; WARN
 listed in the report for the reviewer. Each rule's message says what the pattern usually is, the sound
 shapes, and when to keep it: a line that checks a field's format, or reads a closed set that a schema,
 protocol or provider fixes, may keep a finding with `# nosemgrep: <rule-id> -- <reason>`, which review
-checks. An added `nosemgrep` comment without a rule and a reason fails the gate, because a bare one hides
-every finding on its line. A repository adds its own stricter bans as semgrep rule files under
-`semgrep.rules`, with the same severities. semgrep runs as one job with 120 seconds per rule and file; a
-file it gives up on, in whole or in one long function, makes the result "partial" and names the file.
+checks. semgrep also honours `nosem`, in any case, and a comment alone on the line above. So an added line
+in a file semgrep scans that carries one in any other form fails the gate: a bare one hides every finding
+on its line, and one with no reason gives review nothing to check. A repository adds its own stricter
+bans as semgrep rule files under `semgrep.rules`, with the same severities. semgrep runs as one job with
+120 seconds per rule and file; a file it gives up on, in whole or in one long function, makes the result
+"partial" and names the file.
 
 The rules for words (practice C6) look at the shape of the code, not at its names:
 
@@ -141,8 +143,10 @@ The rules for words (practice C6) look at the shape of the code, not at its name
 - `ep-lexical-intent`: one or two words, a word constant or a word regex, used on a value named for a
   person's text (`text`, `question`, `reply` and the like).
 
-They fire on a program's own closed sets too, such as a grammar's operators or a provider's enum, which
-keep their line with a reason.
+They fire on a program's own closed sets too, such as a grammar's operators, a provider's enum, a
+framework's key list (`fields = ["id", "name", "email"]`) or a key check
+(`all(k in d for k in ("id", "name", "type"))`), which keep their line with a reason. What they miss is
+listed under [Gaps](PRACTICES.md#gaps).
 
 **Audit.** The gate reads only added lines, so an old instance stays until a pull request edits its line.
 `checks.sh audit` lists them all: it runs the same semgrep rules over every tracked file under
