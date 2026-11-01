@@ -61,14 +61,17 @@ A practice whose only enforcers are review or instruction is listed under [Gaps]
 |---|---|---|---|---|---|---|
 | D1 | Every merge has an independent review: a reviewer that did not author the change and reads the Quality report. | [Hugo delivery]; [SWE 9] | gate (the yadm merge guard requires an independent approval note) | Self-reviewed merges | A trivial change waits for a reviewer lane | Orchestrating agent, minutes |
 | D2 | Merges wait for the repository's own CI: every GitHub Actions check on the head concluded success, skipped or neutral. Failed and cancelled refuse; pending refuses unless the approval note says `CI unavailable: <reason>`. Other apps' checks are not read. | [Hugo 10-05] | gate (the yadm merge guard) | Merging untested or failing code, as after a cancelled run on 2026-10-05 | A queued run makes an agent wait; with no runner online, the escape line is visible on the PR and counted by the weekly audit | Merging agent, minutes |
+| D3 | The pull-request gate runs one fast tier on the lowest supported runtime. Full matrices and long measurement suites run on `main`, on a schedule or on dispatch, and supply release evidence. A release reuses the full run of its exact tree. A check that protects users, data or releases moves to `main` or the release, never out, and each move is named. | [Hugo 10-30] | review | Pull-request verdicts that wait on full matrices: on one repository, full CI on every ready pull request took the verdict from 10 to 99 minutes at the median and from 128 to 753 runner-minutes per run (2026-10-28 to 2026-10-30) | A failure that only the full tier catches lands on `main` and is fixed forward; in the measured window, 5 of 15 gating failures were full-only | The next author on `main`, minutes to hours |
+| D4 | An advisory job never shares a workflow run that release evidence waits on. It runs in its own workflow, on a schedule or on dispatch. | [Hugo 10-30] | review | Releases that wait on advisory jobs: evidence that needs a completed run waited 21 minutes past a passed gate (2026-10-30) | The advisory result arrives after the merge instead of on the pull request | Owner of the measurement, minutes |
+| D5 | Judge a CI speed change by the verdict time, from run creation to the required gate's completion with queue time included, and by runner-minutes and runs per day. Job execution time alone does not show it when runners share a concurrency cap. | [Hugo 10-30] | instruction | Speed changes judged by job time while the queue dominates: a full run's longest job took 14 minutes and its gate passed at 40 (2026-10-31); after three quarters of the per-run cost came off, run volume still held the median verdict at 34 minutes | A change that shortens jobs but not the queue is reported as no change | Author agent, minutes |
 
 ## Gaps
 
 These practices have no automated enforcer; they rely on the author and the independent reviewer.
 
 - **Review, with or without an instruction:** T1, T2, T3 (proof weight hints at T1 and T3 but cannot
-  judge them), T5, T6, T7, T8, C3, W2, W3, K1, K3.
-- **Instruction only:** K2, K4.
+  judge them), T5, T6, T7, T8, C3, W2, W3, K1, K3, D3, D4.
+- **Instruction only:** K2, K4, D5.
 - **Partly covered:** C1 does not catch a callee left dead when a pull request removes its caller in another
   file; the monthly gardener sweeps that. For Python the gate covers ruff's F rules only; unreferenced
   definitions are the vulture measure, which a reviewer judges.
@@ -120,3 +123,6 @@ repository's CI passes on `main` (see the [README](README.md)).
   gates, merges wait for their own CI.
 - [Hugo 10-06]: Hugo's approval, 2026-10-06, of automatic checks across all repositories: linters on added lines join the gate.
 - [Hugo delivery]: Hugo's delivery rules: author-independent review during implementation and before merge.
+- [Hugo 10-30]: Hugo's ruling, 2026-10-30, after full CI on every ready pull request made verdicts take over an
+  hour: pull requests get one fast tier, full coverage runs on `main` and at release, and expensive
+  measurement runs move to a nightly schedule.
