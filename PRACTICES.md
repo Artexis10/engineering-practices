@@ -61,14 +61,17 @@ A practice whose only enforcers are review or instruction is listed under [Gaps]
 |---|---|---|---|---|---|---|
 | D1 | Every merge has an independent review: a reviewer that did not author the change and reads the Quality report. | [Hugo delivery]; [SWE 9] | gate (the yadm merge guard requires an independent approval note) | Self-reviewed merges | A trivial change waits for a reviewer lane | Orchestrating agent, minutes |
 | D2 | Merges wait for the repository's own CI: every GitHub Actions check on the head concluded success, skipped or neutral. Failed and cancelled refuse; pending refuses unless the approval note says `CI unavailable: <reason>`. Other apps' checks are not read. | [Hugo 10-05] | gate (the yadm merge guard) | Merging untested or failing code, as after a cancelled run on 2026-10-05 | A queued run makes an agent wait; with no runner online, the escape line is visible on the PR and counted by the weekly audit | Merging agent, minutes |
+| D3 | A pull request's required checks run one fast tier on the lowest supported runtime. The full tier (every runtime and the long measurement suites) runs on `main`, on a schedule or on dispatch. A release reuses a successful full run of its exact tree; a red or missing full run blocks the release. A check that protects users, data or releases moves to `main` or the release, never out of CI, and the author names each move in the pull request. | [Hugo 10-30] | review | Pull requests that wait on the full tier. On one repository, the median time from run creation to the required check went from 10 minutes (n=297) to 99 (n=47) when every ready pull request ran the full tier. Median cost went from 128 to 753 runner-minutes per run (2026-10-23 to 2026-10-30) | A failure that only the full tier catches reaches `main` and is fixed there. From 2026-10-28 to 2026-10-30, 5 of 15 failures of required pull-request checks came from the full tier only | The next author on `main`, minutes to hours |
+| D4 | An advisory job runs in its own workflow, never in a run that release evidence waits on. A run completes only when all its jobs finish. | [Hugo 10-30] | review | Releases that wait on advisory jobs: on one repository, a full run passed its required check and then ran 21 more minutes for advisory jobs before release evidence could use it (2026-10-30) | The moved job loses the setup and outputs it shared with the run it left, and repeats them at its own cost | Owner of the measurement, minutes |
+| D5 | Judge a CI speed change by the time from run creation to the required check, queue included, beside runner-minutes per run and runs per day. Job execution time alone misleads when runners share a concurrency cap. | [CI 10-31] | instruction | Speed changes judged by job time while the queue dominates. On one repository, a full run's longest job took 14 minutes and its required check finished after 40. After a 75% cut in median per-run cost, run volume kept the median at 34 minutes (n=119) | Queue time set by unrelated load hides a real saving or blames the change; runner-minutes per run show the change's own effect | Author agent, minutes |
 
 ## Gaps
 
 These practices have no automated enforcer; they rely on the author and the independent reviewer.
 
 - **Review, with or without an instruction:** T1, T2, T3 (proof weight hints at T1 and T3 but cannot
-  judge them), T5, T6, T7, T8, C3, W2, W3, K1, K3.
-- **Instruction only:** K2, K4.
+  judge them), T5, T6, T7, T8, C3, W2, W3, K1, K3, D3, D4.
+- **Instruction only:** K2, K4, D5.
 - **Partly covered:** C1 does not catch a callee left dead when a pull request removes its caller in another
   file; the monthly gardener sweeps that. For Python the gate covers ruff's F rules only; unreferenced
   definitions are the vulture measure, which a reviewer judges.
@@ -120,3 +123,9 @@ repository's CI passes on `main` (see the [README](README.md)).
   gates, merges wait for their own CI.
 - [Hugo 10-06]: Hugo's approval, 2026-10-06, of automatic checks across all repositories: linters on added lines join the gate.
 - [Hugo delivery]: Hugo's delivery rules: author-independent review during implementation and before merge.
+- [Hugo 10-30]: Hugo's ruling, 2026-10-30, after full CI on every ready pull request made verdicts take over an
+  hour: pull requests get one fast tier, full coverage runs on `main` and supplies release evidence, and
+  expensive measurement runs move to a nightly schedule so that they stop holding up pull requests and
+  releases.
+- [CI 10-31]: GitHub Actions jobs API measurements of one repository's CI, 2026-10-16 to 2026-11-01, before
+  and after the [Hugo 10-30] change.
