@@ -55,6 +55,13 @@ A practice whose only enforcers are review or instruction is listed under [Gaps]
 | K3 | Fail closed where an unexpected state means something is wrong (parsers, authentication, money, schema validation), not where the environment is eventually consistent (Kubernetes, cloud APIs, network-fetched tools). | [Hugo 09-04] | instruction; review | Outages and normal drift turned into merge or deploy freezes | A real fault passes as drift; monitoring, not the gate, catches it | Hugo, when it surfaces |
 | K4 | Size governance to blast radius. Removing a control is legitimate work, argued with the same evidence as adding one. | [Hugo 09-04] | instruction | Controls that only ratchet up | None | Nobody |
 
+## Design
+
+| ID | Practice | Source | Enforcer | Prevents | Wrong-fire cost | Who pays |
+|---|---|---|---|---|---|---|
+| S1 | Separate concerns and responsibilities: each module, service, session and lane owns one job, and a change to one job does not reach into another's. | [Hugo 11-06] | instruction; review | Changes that leak across owners, so one fix breaks another's work and no owner sees the whole of a job | A change that is truly cross-cutting is questioned; the author names why it spans owners | Author agent, minutes |
+| S2 | Keep powerful machinery behind a simple interface. A person asks in natural language and it works; an agent calls one obvious operation. Staging, residue and internal states stay hidden unless the user must act on them. | [Hugo 11-06] | instruction; review | People and agents overloaded with internal steps: on 2026-11-06 a successful Cloud import told its user that 3,305 upload copies were still staged and asked whether to discard them | A detail the user needs is hidden; review or the first user question restores it | Reviewer, minutes |
+
 ## Delivery
 
 | ID | Practice | Source | Enforcer | Prevents | Wrong-fire cost | Who pays |
@@ -64,13 +71,15 @@ A practice whose only enforcers are review or instruction is listed under [Gaps]
 | D3 | A pull request's required checks run one fast tier on the lowest supported runtime. The full tier (every runtime and the long measurement suites) runs on `main`, on a schedule or on dispatch. A release reuses a successful full run of its exact tree; a red or missing full run blocks the release. A check that protects users, data or releases moves to `main` or the release, never out of CI, and the author names each move in the pull request. | [Hugo 10-30] | review | Pull requests that wait on the full tier. On one repository, the median time from run creation to the required check went from 10 minutes (n=297) to 99 (n=47) when every ready pull request ran the full tier. Median cost went from 128 to 753 runner-minutes per run (2026-10-23 to 2026-10-30) | A failure that only the full tier catches reaches `main` and is fixed there. From 2026-10-28 to 2026-10-30, 5 of 15 failures of required pull-request checks came from the full tier only | The next author on `main`, minutes to hours |
 | D4 | An advisory job runs in its own workflow, never in a run that release evidence waits on. A run completes only when all its jobs finish. | [Hugo 10-30] | review | Releases that wait on advisory jobs: on one repository, a full run passed its required check and then ran 21 more minutes for advisory jobs before release evidence could use it (2026-10-30) | The moved job loses the setup and outputs it shared with the run it left, and repeats them at its own cost | Owner of the measurement, minutes |
 | D5 | Judge a CI speed change by the time from run creation to the required check, queue included, beside runner-minutes per run and runs per day. Job execution time alone misleads when runners share a concurrency cap. | [CI 10-31] | instruction | Speed changes judged by job time while the queue dominates. On one repository, a full run's longest job took 14 minutes and its required check finished after 40. After a 75% cut in median per-run cost, run volume kept the median at 34 minutes (n=119) | Queue time set by unrelated load hides a real saving or blames the change; runner-minutes per run show the change's own effect | Author agent, minutes |
+| D6 | Sessions work on their own and stop only for a decision, approval or credential that only Hugo holds. They rule on routine, reversible choices and record each ruling; a question to Hugo says in one plain sentence what Hugo decides and what each option does. | [Hugo 11-06] | instruction; gate (the harness stop hook refuses a stop while ready work remains) | Work that stalls overnight on questions an agent could answer, and questions Hugo cannot read without the session's context | A stop that needed Hugo is refused once; the session declares the wait and stops | Session agent, minutes |
+| D7 | Evaluate in small rounds that each change one thing and still give a solid signal: a per-case comparison with its confidence interval, not a bulk run. Scale only after the approach is shown to work. | [Hugo 11-06]; [Hugo measurement] | instruction; review | Large runs that cannot say which change moved the result, and spend on approaches not yet shown to work | A question that needs a large sample is held to small rounds; the author names the sample size it needs | Author agent, minutes |
 
 ## Gaps
 
 These practices have no automated enforcer; they rely on the author and the independent reviewer.
 
 - **Review, with or without an instruction:** T1, T2, T3 (proof weight hints at T1 and T3 but cannot
-  judge them), T5, T6, T7, T8, C3, W2, W3, K1, K3, D3, D4.
+  judge them), T5, T6, T7, T8, C3, W2, W3, K1, K3, D3, D4, S1, S2, D7.
 - **Instruction only:** K2, K4, D5.
 - **Partly covered:** C1 does not catch a callee left dead when a pull request removes its caller in another
   file; the monthly gardener sweeps that. For Python the gate covers ruff's F rules only; unreferenced
@@ -127,5 +136,10 @@ repository's CI passes on `main` (see the [README](README.md)).
   hour: pull requests get one fast tier, full coverage runs on `main` and supplies release evidence, and
   expensive measurement runs move to a nightly schedule so that they stop holding up pull requests and
   releases.
+- [Hugo 11-06]: Hugo's rulings, 2026-11-06: separate concerns and responsibilities; keep the interface simple for people
+  and agents over powerful machinery; sessions work on their own and ask only what Hugo must decide, in plain words;
+  evaluate in small rounds that still give a solid signal.
+- [Hugo measurement]: Hugo's measurement rules: small rounds that each teach something, per-case comparison with a
+  confidence interval, one blind held-out run decides a switch.
 - [CI 10-31]: GitHub Actions jobs API measurements of one repository's CI, 2026-10-16 to 2026-11-01, before
   and after the [Hugo 10-30] change.
