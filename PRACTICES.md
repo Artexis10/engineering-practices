@@ -59,8 +59,8 @@ A practice whose only enforcers are review or instruction is listed under [Gaps]
 
 | ID | Practice | Source | Enforcer | Prevents | Wrong-fire cost | Who pays |
 |---|---|---|---|---|---|---|
-| S1 | Separate concerns and responsibilities: each module, service, session and lane owns one job, and a change to one job does not reach into another's. | [Hugo 11-06] | instruction; review | Changes that leak across owners, so one fix breaks another's work and no owner sees the whole of a job | A change that is truly cross-cutting is questioned; the author names why it spans owners | Author agent, minutes |
-| S2 | Keep powerful machinery behind a simple interface. A person asks in natural language and it works; an agent calls one obvious operation. Staging, residue and internal states stay hidden unless the user must act on them. | [Hugo 11-06] | instruction; review | People and agents overloaded with internal steps: on 2026-11-06 a successful Cloud import told its user that 3,305 upload copies were still staged and asked whether to discard them | A detail the user needs is hidden; review or the first user question restores it | Reviewer, minutes |
+| S1 | Give each module, service and role one job, and keep a change to one job from reaching into another's. | [Hugo 11-06] | instruction; review | Changes that leak across owners, so one fix breaks another's work and no owner sees the whole of a job | A change that is truly cross-cutting is questioned; the author names why it spans owners | Author agent, minutes |
+| S2 | Put powerful machinery behind a simple interface: a person-facing interface takes a plain-language request and works; an agent-facing interface is one obvious operation. Hide intermediate steps and leftovers unless the person must act on them; an unknown, partial or failed outcome stays visible. | [Hugo 11-06] | instruction; review | People and agents overloaded with internal steps: on 2026-11-06 a successful Cloud import told its user that 3,305 upload copies were still staged and asked whether to discard them | A detail the user needs is hidden; review or the first user question restores it | Reviewer, minutes |
 
 ## Delivery
 
