@@ -32,6 +32,9 @@ machine can check.
      ([vulture](https://github.com/jendrikseipp/vulture), confidence 60 and up), and test-job runtime
      against main. These fail nothing. A measure that could not be computed says "not run" and why, and
      one that could not read a file the pull request changes says "partial" and names the file.
+     The comment is short: it leaves out checks that are not configured, puts a section that found
+     nothing on one line, and keeps each failure, finding and "not run" in full. The job summary
+     keeps every table.
 
 ## Adopt it
 
@@ -168,7 +171,7 @@ setup and steps before the action (for example setup-go).
 
 ## `.github/quality.yml`
 
-Every key is optional. A language or linter key that is absent turns its check off, and the report shows it as
+Every key is optional. A language or linter key that is absent turns its check off, and the job summary shows it as
 "not configured".
 
 **Path classes default to product.** A path belongs in a proof class (tests, fixtures, eval, scripts,

@@ -4,6 +4,10 @@
 Reads what scripts/checks.sh left in EP_OUT, measures proof weight with git and
 test-job runtime with the GitHub Actions API. It never fails the job: a measure
 it cannot compute says "not run" and why, never zero.
+
+The job summary carries every table. The PR comment is short, because people read it on the
+pull request: it leaves out checks that are not configured, puts a section that found nothing
+on one line, and keeps every failure, finding and "not run" in full.
 """
 
 import fnmatch
@@ -40,6 +44,7 @@ LOCKFILES = [
     "Cargo.lock", "go.sum", "uv.lock", "poetry.lock", "Pipfile.lock", "composer.lock", "Gemfile.lock",
 ]
 SHOWN = 30  # findings listed per check
+CLEAN = {"passed", "none on added lines"}  # the statuses checks.sh writes for a complete, clean run
 SAMPLES, MINIMUM = 5, 3  # main runs in the runtime median; fewer than MINIMUM is not comparable
 
 env = os.environ.get
@@ -95,13 +100,28 @@ def api(path, method="GET", body=None, keep=0):
         raise
 
 
-def checks(rows):
-    """A result table for checks.sh checks, then each check's findings."""
+def checks(rows, short=False):
+    """A result table for checks.sh checks, then each check's findings.
+
+    Short: no row for a check that is not configured, and one line when every check that
+    ran has a clean status and no findings. A status is clean only when it is one of CLEAN, so a
+    partial read, a failure, a "not run" or a status this code does not know keeps the table.
+    """
+    results = [
+        (name, label, read(name + ".status") or "not run: the step recorded no result", read(name + ".findings") or "")
+        for name, label in rows
+    ]
+    if short:
+        results = [r for r in results if r[2] != "not configured"]
+        if not results:
+            return ["None configured."]
+        if all(status in CLEAN and not findings for _, _, status, findings in results):
+            return [f"Nothing found by {', '.join(name for name, _, _, _ in results)}."]
     table = ["| Check | Result |", "|---|---|"]
     details = []
-    for name, label in rows:
-        table.append(f"| {label} | {cell(read(name + '.status') or 'not run: the step recorded no result')} |")
-        findings = (read(name + ".findings") or "").splitlines()
+    for name, label, status, findings in results:
+        table.append(f"| {label} | {cell(status)} |")
+        findings = findings.splitlines()
         if findings:
             more = [f"... and {len(findings) - SHOWN} more"] if len(findings) > SHOWN else []
             # An indented code block has no closing fence for a finding to forge.
@@ -128,11 +148,14 @@ def matches(path, pattern):
 
 
 def proof_weight(config, base):
+    """(the full table and notes, the short form): one diff read for both."""
     if not base:
-        return [f"Not run: {read('setup.reason') or 'no merge base was recorded'}."]
+        line = [f"Not run: {read('setup.reason') or 'no merge base was recorded'}."]
+        return line, line
     diff = git("diff", "--numstat", "-z", "-M", base, "HEAD")
     if diff.returncode:
-        return [f"Not run: git diff failed ({(diff.stderr.strip().splitlines() or ['no output'])[0]})."]
+        line = [f"Not run: git diff failed ({(diff.stderr.strip().splitlines() or ['no output'])[0]})."]
+        return line, line
     classes = {
         name: [globs] if isinstance(globs, str) else (globs or [])
         for name, globs in (config.get("classes") or {}).items()
@@ -156,7 +179,8 @@ def proof_weight(config, base):
             row[1] += int(added)
             row[2] += int(removed)
     if not totals:
-        return ["No files changed against the base."]
+        line = ["No files changed against the base."]
+        return line, line
     lines = ["| Class | Files | Lines added | Lines removed |", "|---|---:|---:|---:|"]
     for name in [c for c in dict.fromkeys([*classes, "generated", "product"]) if c in totals]:
         files, added, removed, binary = totals[name]
@@ -165,15 +189,20 @@ def proof_weight(config, base):
     proof = [c for c in totals if c not in NOT_PROOF]
     product = totals.get("product", [0, 0])[1]
     proof_added = sum(totals[c][1] for c in proof)
-    return lines + [
+    sentence = (
+        f"Product +{product} lines against proof +{proof_added} lines"
+        f" ({cell(', '.join(proof)) or 'no proof classes changed'})."
+    )
+    binary = sum(row[3] for row in totals.values())
+    uncounted = [f"{binary} binary files changed; their lines are not counted."] if binary else []
+    outweighs = ["Proof that outweighs the product it covers needs a reason in review."]
+    full = lines + [
         "",
-        (
-            f"Product +{product} lines against proof +{proof_added} lines"
-            f" ({cell(', '.join(proof)) or 'no proof classes changed'})."
-        ),
+        sentence,
         "A file that matches no class counts as product; lockfiles and other generated files, and docs, count as neither.",
-        "Proof that outweighs the product it covers needs a reason in review.",
+        *outweighs,
     ]
+    return full, [sentence, *uncounted, *(outweighs if proof_added > product else [])]
 
 
 def seconds(job):
@@ -249,6 +278,8 @@ def runtime(config):
 
 
 def render():
+    """The report in two forms, the short PR comment and the full job summary. The diff and the
+    job times are read once; each form reads the check results again from EP_OUT."""
     config = json.loads(read("config.json") or "null")
     config = config if isinstance(config, dict) else {}
     base = read("merge_base")
@@ -256,42 +287,72 @@ def render():
     against = f"against base `{base[:7]}`" if base else "with no base"
     unknown_budget = ["", "Time budget unknown: the checks recorded none, so the report ran without a deadline."]
     unknown_budget = unknown_budget if DEADLINE is None else []
-    return "\n".join(
-        [
-            MARKER,
-            "## Quality report",
-            "",
-            (
-                f"`{head}` {against}. Only the gate fails this check; the rest informs review."
-                f" Why each check exists: [PRACTICES.md]({REGISTRY})."
-            ),
-            *unknown_budget,
-            "",
-            f"### Gate: {verdict()}",
-            "",
-            (
-                "Dead code, lint findings and banned patterns on lines this pull request adds. Silence a false"
-                " positive in `.github/quality.yml`, in the linter's own config, or for a banned pattern with a"
-                " reasoned `# nosemgrep:` line."
-            ),
-            "",
-            *checks(GATE),
-            "",
-            "### Proof weight",
-            "",
-            "Lines added and removed per path class, from `git diff --numstat` against the base.",
-            "",
-            *proof_weight(config, base),
-            "",
-            "### Measures on added lines",
-            "",
-            *checks(MEASURES),
-            "",
-            "### Test runtime",
-            "",
-            *runtime(config),
-        ]
+    gate = verdict()
+    times = runtime(config)  # API calls: measured once for both forms
+    weight, short_weight = proof_weight(config, base)
+    opening = [
+        MARKER,
+        "## Quality report",
+        "",
+        (
+            f"`{head}` {against}. Only the gate fails this check; the rest informs review."
+            f" Why each check exists: [PRACTICES.md]({REGISTRY})."
+        ),
+        *unknown_budget,
+        "",
+        f"### Gate: {gate}",
+        "",
+    ]
+    explain = [
+        (
+            "Dead code, lint findings and banned patterns on lines this pull request adds. Silence a false"
+            " positive in `.github/quality.yml`, in the linter's own config, or for a banned pattern with a"
+            " reasoned `# nosemgrep:` line."
+        ),
+        "",
+    ]
+    full = [
+        *opening,
+        *explain,
+        *checks(GATE),
+        "",
+        "### Proof weight",
+        "",
+        "Lines added and removed per path class, from `git diff --numstat` against the base.",
+        "",
+        *weight,
+        "",
+        "### Measures on added lines",
+        "",
+        *checks(MEASURES),
+        "",
+        "### Test runtime",
+        "",
+        *times,
+    ]
+    repo, run_id = env("GITHUB_REPOSITORY"), env("GITHUB_RUN_ID")
+    tables = (
+        f"Every table: [this run's summary]({env('GITHUB_SERVER_URL', 'https://github.com')}/{repo}/actions/runs/{run_id})."
+        if repo and run_id
+        else "Every table: this run's job summary."
     )
+    short = [
+        *opening,
+        *(explain if gate.startswith("failed") else []),
+        *checks(GATE, short=True),
+        "",
+        "### Proof weight",
+        "",
+        *short_weight,
+        "",
+        "### Measures on added lines",
+        "",
+        *checks(MEASURES, short=True),
+        *([] if not config.get("test_jobs") else ["", "### Test runtime", "", *times]),
+        "",
+        tables,
+    ]
+    return "\n".join(short), "\n".join(full)
 
 
 def publish(body):
@@ -335,12 +396,12 @@ def publish(body):
 
 def main():
     try:
-        body = render()
+        body, full = render()
     except Exception as error:  # noqa: BLE001 - a report bug must not block a merge
         print(f"::warning::Quality report not rendered: {error!r}")
         return
     note = publish(body)
-    summary = body + (f"\n\n> {note}" if note else "")
+    summary = full + (f"\n\n> {note}" if note else "")
     if env("GITHUB_STEP_SUMMARY"):
         with open(env("GITHUB_STEP_SUMMARY"), "a") as handle:
             handle.write(summary + "\n")
