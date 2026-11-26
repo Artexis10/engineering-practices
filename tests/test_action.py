@@ -528,6 +528,26 @@ class Report(unittest.TestCase):
         self.assertEqual(row(report, "generated"), ["generated", "1", "2", "0"])
         self.assertIn("Product +2 lines against proof +0 lines", report)
 
+    def comment(self, base, head):
+        """The short form that report.py posts as the pull request comment."""
+        path, base_commit = repository(base, head)
+        _, out = run(path, base_commit, str(SCRIPTS / "checks.sh"), "gate")
+        run(path, base_commit, str(SCRIPTS / "checks.sh"), "measures", EP_OUT=str(out))
+        code = f"import sys; sys.path.insert(0, {str(SCRIPTS)!r}); import report; print(report.render()[0])"
+        return run(path, base_commit, "python3", "-c", code, EP_OUT=str(out))[0].stdout
+
+    def test_comment_drops_tables_but_keeps_the_weight_line_that_review_tooling_reads(self):
+        config = "classes:\n  tests: ['tests/*']\n  product: ['src/*']\n"
+        comment = self.comment({".github/quality.yml": config, "src/app.py": "x = 1\n"}, {"tests/test_app.py": "a\n"})
+        self.assertNotIn("\n| ", comment)  # no table: no check configured, nothing found
+        self.assertIn("\nProduct +0 lines against proof +1 lines (tests).", comment)
+
+    def test_comment_keeps_a_failed_check_and_its_finding(self):
+        comment = self.comment(PY, {"src/app.py": PY["src/app.py"].replace("sys.argv", "sys.argv, missing")})
+        self.assertIn("### Gate: failed", comment)
+        self.assertIn("src/app.py:4: Undefined name `missing`", comment)
+        self.assertNotIn("| not configured |", comment)
+
 
 if __name__ == "__main__":
     unittest.main()
