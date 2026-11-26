@@ -44,6 +44,7 @@ LOCKFILES = [
     "Cargo.lock", "go.sum", "uv.lock", "poetry.lock", "Pipfile.lock", "composer.lock", "Gemfile.lock",
 ]
 SHOWN = 30  # findings listed per check
+CLEAN = {"passed", "none on added lines"}  # the statuses checks.sh writes for a complete, clean run
 SAMPLES, MINIMUM = 5, 3  # main runs in the runtime median; fewer than MINIMUM is not comparable
 
 env = os.environ.get
@@ -103,7 +104,8 @@ def checks(rows, short=False):
     """A result table for checks.sh checks, then each check's findings.
 
     Short: no row for a check that is not configured, and one line when every check that
-    ran passed with no findings.
+    ran has a clean status and no findings. A status is clean only when it is one of CLEAN, so a
+    partial read, a failure, a "not run" or a status this code does not know keeps the table.
     """
     results = [
         (name, label, read(name + ".status") or "not run: the step recorded no result", read(name + ".findings") or "")
@@ -113,8 +115,7 @@ def checks(rows, short=False):
         results = [r for r in results if r[2] != "not configured"]
         if not results:
             return ["None configured."]
-        clean = all(not findings and not status.startswith(("failed", "not run")) for _, _, status, findings in results)
-        if clean:
+        if all(status in CLEAN and not findings for _, _, status, findings in results):
             return [f"Nothing found by {', '.join(name for name, _, _, _ in results)}."]
     table = ["| Check | Result |", "|---|---|"]
     details = []
@@ -146,12 +147,15 @@ def matches(path, pattern):
     return fnmatch.fnmatchcase(path, pattern) or (pattern.startswith("**/") and fnmatch.fnmatchcase(path, pattern[3:]))
 
 
-def proof_weight(config, base, short=False):
+def proof_weight(config, base):
+    """(the full table and notes, the short form): one diff read for both."""
     if not base:
-        return [f"Not run: {read('setup.reason') or 'no merge base was recorded'}."]
+        line = [f"Not run: {read('setup.reason') or 'no merge base was recorded'}."]
+        return line, line
     diff = git("diff", "--numstat", "-z", "-M", base, "HEAD")
     if diff.returncode:
-        return [f"Not run: git diff failed ({(diff.stderr.strip().splitlines() or ['no output'])[0]})."]
+        line = [f"Not run: git diff failed ({(diff.stderr.strip().splitlines() or ['no output'])[0]})."]
+        return line, line
     classes = {
         name: [globs] if isinstance(globs, str) else (globs or [])
         for name, globs in (config.get("classes") or {}).items()
@@ -175,7 +179,8 @@ def proof_weight(config, base, short=False):
             row[1] += int(added)
             row[2] += int(removed)
     if not totals:
-        return ["No files changed against the base."]
+        line = ["No files changed against the base."]
+        return line, line
     lines = ["| Class | Files | Lines added | Lines removed |", "|---|---:|---:|---:|"]
     for name in [c for c in dict.fromkeys([*classes, "generated", "product"]) if c in totals]:
         files, added, removed, binary = totals[name]
@@ -188,14 +193,16 @@ def proof_weight(config, base, short=False):
         f"Product +{product} lines against proof +{proof_added} lines"
         f" ({cell(', '.join(proof)) or 'no proof classes changed'})."
     )
-    if short:
-        return [sentence] + (["Proof that outweighs the product it covers needs a reason in review."] if proof_added > product else [])
-    return lines + [
+    binary = sum(row[3] for row in totals.values())
+    uncounted = [f"{binary} binary files changed; their lines are not counted."] if binary else []
+    outweighs = ["Proof that outweighs the product it covers needs a reason in review."]
+    full = lines + [
         "",
         sentence,
         "A file that matches no class counts as product; lockfiles and other generated files, and docs, count as neither.",
-        "Proof that outweighs the product it covers needs a reason in review.",
+        *outweighs,
     ]
+    return full, [sentence, *uncounted, *(outweighs if proof_added > product else [])]
 
 
 def seconds(job):
@@ -271,7 +278,8 @@ def runtime(config):
 
 
 def render():
-    """The report twice from one set of measures: (the short PR comment, the full job summary)."""
+    """The report in two forms, the short PR comment and the full job summary. The diff and the
+    job times are read once; each form reads the check results again from EP_OUT."""
     config = json.loads(read("config.json") or "null")
     config = config if isinstance(config, dict) else {}
     base = read("merge_base")
@@ -281,6 +289,7 @@ def render():
     unknown_budget = unknown_budget if DEADLINE is None else []
     gate = verdict()
     times = runtime(config)  # API calls: measured once for both forms
+    weight, short_weight = proof_weight(config, base)
     opening = [
         MARKER,
         "## Quality report",
@@ -311,7 +320,7 @@ def render():
         "",
         "Lines added and removed per path class, from `git diff --numstat` against the base.",
         "",
-        *proof_weight(config, base),
+        *weight,
         "",
         "### Measures on added lines",
         "",
@@ -329,12 +338,12 @@ def render():
     )
     short = [
         *opening,
-        *([] if gate == "passed" else explain),
+        *(explain if gate.startswith("failed") else []),
         *checks(GATE, short=True),
         "",
         "### Proof weight",
         "",
-        *proof_weight(config, base, short=True),
+        *short_weight,
         "",
         "### Measures on added lines",
         "",

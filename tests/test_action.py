@@ -548,6 +548,11 @@ class Report(unittest.TestCase):
         self.assertIn("src/app.py:4: Undefined name `missing`", comment)
         self.assertNotIn("| not configured |", comment)
 
+    def test_comment_keeps_a_partial_read_and_names_the_file(self):
+        comment = self.comment(PY, {"src/bad.py": "def broken(:\n"})
+        self.assertIn("partial, could not read src/bad.py", comment)
+        self.assertNotIn("Nothing found by jscpd, vulture", comment)
+
 
 if __name__ == "__main__":
     unittest.main()
